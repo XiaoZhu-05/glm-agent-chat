@@ -6,6 +6,8 @@ GLM 开放平台（智谱 BigModel）的 OpenAI 兼容接口驱动 `glm` 系列�
 
 ![tech](https://img.shields.io/badge/Node.js-%E2%89%A518-zero--dependency-339933) ![license](https://img.shields.io/badge/license-MIT-blue)
 
+![界面预览：深度思考卡片 + 命令/工具卡片 + Markdown 回答](docs/screenshot.png)
+
 ## ✨ 功能特性
 
 - 💬 **网页对话** —— GLM 网页版风格 UI：多会话侧边栏、Markdown 渲染、代码高亮、一键复制
