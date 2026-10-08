@@ -1,0 +1,14 @@
+{
+  "name": "glm-agent-chat",
+  "version": "1.0.0",
+  "description": "GLM Agent Chat —— DeepSeek-Harness 风格的网页 Agent 对话框，支持思考链与命令执行展示",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "keywords": ["glm", "agent", "chat", "deepseek-harness", "sse", "reasoning"]
+}

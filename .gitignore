@@ -1,0 +1,16 @@
+# 机密配置（API Key）
+.env
+
+# 运行时数据
+data/
+workspace/
+
+# Node
+node_modules/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
