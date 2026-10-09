@@ -1,6 +1,6 @@
 {
   "base": "http://localhost:3210",
-  "at": "2026-10-09T06:10:43.085Z",
+  "at": "2026-10-09T07:34:12.813Z",
   "models": {
     "text": "glm-4.5-flash",
     "vision": "glm-4v-flash"
@@ -22,17 +22,17 @@
       "id": "T1b",
       "name": "输出结构化计划(\\`\\`\\`plan JSON)",
       "expected": "JSON 含 title/steps≥2",
-      "actual": "steps=3",
+      "actual": "steps=2",
       "pass": true,
-      "evidence": "{\"title\":\"创建简单个人主页\",\"goal\":\"在工作区创建一个包含标题和自我介绍的index.html文件\",\"steps\":[{\"action\":\"查看工作区文件结构\",\"detail\":\"使用list_dir命令查看当前工作目录的文件，确认没有同名文件\"},{\"action\":\"创建index.html文件\",\"detail\":\"使用write_file命令创建基本的HTML文件，包"
+      "evidence": "{\"title\":\"创建简单个人主页\",\"goal\":\"在工作区创建一个包含标题和自我介绍的 index.html 文件\",\"steps\":[{\"action\":\"查看工作区目录结构\",\"detail\":\"使用 list_dir 命令检查工作区当前内容，确认没有冲突的 index.html 文件\"},{\"action\":\"创建 index.html 文件\",\"detail\":\"使用 write_f"
     },
     {
       "id": "T1c",
       "name": "确认后执行产生工具调用",
       "expected": "≥1 次 tool_call",
-      "actual": "3 次",
+      "actual": "2 次",
       "pass": true,
-      "evidence": "list_dir,read_file,write_file"
+      "evidence": "list_dir,read_file"
     },
     {
       "id": "T2-png",
@@ -142,9 +142,9 @@
       "id": "T5-real-call",
       "name": "真实发起 web_search 工具调用",
       "expected": "出现 tool_call(web_search)",
-      "actual": "web_search",
+      "actual": "web_search,web_search",
       "pass": true,
-      "evidence": "{\"query\":\"DeepSeek Harness GitHub 开源仓库地址\"}"
+      "evidence": "{\"query\":\"DeepSeek Harness GitHub 开源仓库\"}"
     },
     {
       "id": "T5-links",
@@ -152,13 +152,13 @@
       "expected": "结果含 ≥1 个 URL",
       "actual": "6 个 URL: https://www.deepseek.com/",
       "pass": true,
-      "evidence": "搜索「DeepSeek Harness GitHub 开源仓库地址」（引擎：Bing，时间：2026-10-09T06:07:45.313Z）的结果：\n1. [DeepSeek | Into the Unknown](https://www.deepseek.com/)\n   1 天前&ensp;·&ensp;DeepSeek is an AI research company focused on building world-leading general artificial intelligence. We"
+      "evidence": "搜索「DeepSeek Harness GitHub 开源仓库」（引擎：Bing，时间：2026-10-09T07:32:26.722Z）的结果：\n1. [DeepSeek | Into the Unknown](https://www.deepseek.com/)\n   1 天前&ensp;·&ensp;DeepSeek is an AI research company focused on building world-leading general artificial intelligence. We d"
     },
     {
       "id": "T5-cite",
       "name": "回答引用来源链接",
       "expected": "回答含 github.com 或 http 链接",
-      "actual": "\n\n根据搜索结果，DeepSeek Harness 的 GitHub 开源仓库地址是：\n\n[https://github.com/deepseek-ai](https://github.com/deepseek-ai)\n\n该仓库包含了 deepseek-harness 项目，其描述为 \"DeepSe",
+      "actual": "\n我来帮你搜索 DeepSeek Harness 的 GitHub 开源仓库地址。\n\n\n根据搜索结果，DeepSeek Harness 的 GitHub 开源仓库地址是：\n\n**https://github.com/deepseek-ai/deepseek-harness**\n\n这是一个由 Deep",
       "pass": true,
       "evidence": ""
     },
@@ -166,7 +166,7 @@
       "id": "T6-ask",
       "name": "模糊需求 → 输出选项卡片而非瞎猜",
       "expected": "```options JSON 块，≥2 个互斥选项",
-      "actual": "options=4: [\"Excel/CSV 表格数据（清洗、统计、分析）\",\"文本数据（提取、总结、处理）\",\"代码/脚本数据（重构、调试、优化）\",\"其他类型数据（请具体说明）\"]",
+      "actual": "options=4: [\"Excel/CSV 表格数据（清洗、统计、分析）\",\"文本数据（提取、总结、分类）\",\"生物数据（FASTA序列、基因组数据）\",\"其他类型数据（请具体说明）\"]",
       "pass": true,
       "evidence": ""
     },
@@ -182,13 +182,13 @@
       "id": "T6-follow",
       "name": "选择后正常继续执行",
       "expected": "收到明确回答/开始执行",
-      "actual": "\n好的，我来帮您处理Excel/CSV表格数据。首先让我查看一下工作区中有哪些文件：\n\n\n我来帮您处理Excel/CSV表格数据。我看到工作区中有多个Excel (+8 次工具)",
+      "actual": "\n好的，我来帮您处理Excel/CSV表格数据。首先让我查看一下工作区中有哪些文件：\n\n我来帮您处理Excel/CSV表格数据。让我先查看一下工作区中的文件情况 (+8 次工具)",
       "pass": true,
       "evidence": ""
     }
   ],
   "webEvidence": {
-    "engineLine": "搜索「DeepSeek Harness GitHub 开源仓库地址」（引擎：Bing，时间：2026-10-09T06:07:45.313Z）的结果：",
+    "engineLine": "搜索「DeepSeek Harness GitHub 开源仓库」（引擎：Bing，时间：2026-10-09T07:32:26.722Z）的结果：",
     "sampleUrls": [
       "https://www.deepseek.com/",
       "https://baike.baidu.com/item/%E6%9D%AD%E5%B7%9E%E6%B7%B1%E5%BA%A6%E6%B1%82%E7%B4%A2%E4%BA%BA%E5%B7%A5%E6%99%BA%E8%83%BD%E5%9F%BA%E7%A1%80%E6%8A%80%E6%9C%AF%E7%A0%94%E7%A9%B6%E6%9C%89%E9%99%90%E5%85%AC%E5%8F%B8/64541110",
