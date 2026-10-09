@@ -11,7 +11,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -45,6 +45,11 @@ const CONFIG = {
   visionModels: (process.env.GLM_VISION_MODELS || 'glm-4v-flash,glm-4.5v,glm-4.6v').split(',').map(s => s.trim()).filter(Boolean),
   imageMaxBytes: parseInt(process.env.IMAGE_MAX_BYTES || String(5 * 1024 * 1024), 10),
   maxImagesPerMessage: parseInt(process.env.MAX_IMAGES_PER_MESSAGE || '4', 10),
+  uploadMaxBytes: parseInt(process.env.UPLOAD_MAX_BYTES || String(10 * 1024 * 1024), 10),
+  pdfMaxPages: parseInt(process.env.PDF_MAX_PAGES || '30', 10),
+  xlsxMaxRows: parseInt(process.env.XLSX_MAX_ROWS || '200', 10),
+  maxAttachmentChars: parseInt(process.env.MAX_ATTACHMENT_CHARS || '8000', 10),
+  pythonBin: process.env.PYTHON_BIN || 'python',
   maxSteps: parseInt(process.env.AGENT_MAX_STEPS || '8', 10),
   cmdTimeoutMs: parseInt(process.env.CMD_TIMEOUT_MS || '30000', 10),
   maxToolOutput: parseInt(process.env.MAX_TOOL_OUTPUT || '6000', 10),
@@ -201,6 +206,111 @@ async function executeTool(name, args) {
   }
 }
 
+/* ---------------------------- 文档解析（上传附件） ---------------------------- */
+
+const TOOLS_DIR = path.join(ROOT, 'tools');
+const UPLOAD_ALLOWED_EXT = ['.pdf', '.xlsx', '.xls', '.csv', '.txt', '.md', '.json', '.fasta', '.fa', '.fas'];
+const FASTA_EXT = ['.fasta', '.fa', '.fas'];
+
+function runPython(script, args) {
+  return new Promise((resolve) => {
+    execFile(CONFIG.pythonBin, [script, ...args], { timeout: 30000, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+      if (err) {
+        const hint = /ENOENT|not found|无法找到/i.test(String(err.message))
+          ? '（未找到 Python，请安装 Python 或在 .env 中配置 PYTHON_BIN）'
+          : '';
+        resolve({ ok: false, error: `文档解析失败${hint}：${String(stderr || err.message).slice(0, 200)}` });
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout.trim().split(/\r?\n/).pop()));
+      } catch {
+        resolve({ ok: false, error: '文档解析输出异常，请确认文件未损坏' });
+      }
+    });
+  });
+}
+
+/** FASTA 原生解析：序列数 / 每条 ID、长度、GC 含量 */
+function parseFasta(text) {
+  const seqs = [];
+  let cur = null;
+  for (const line of String(text).split(/\r?\n/)) {
+    if (line.startsWith('>')) {
+      if (cur) seqs.push(cur);
+      const header = line.slice(1).trim();
+      cur = { id: header.split(/\s+/)[0] || '(无ID)', desc: header, seq: '' };
+    } else if (line.trim() && cur) {
+      cur.seq += line.replace(/\s+/g, '').toUpperCase();
+    }
+  }
+  if (cur) seqs.push(cur);
+  const stats = seqs.map((s) => {
+    const gc = (s.seq.match(/[GC]/g) || []).length;
+    return { id: s.id, length: s.seq.length, gc: s.seq.length ? ((gc / s.seq.length) * 100).toFixed(1) + '%' : '0%' };
+  });
+  return { count: seqs.length, stats, seqs };
+}
+
+/** 根据扩展名解析上传文件，返回统一结构 {ok, kind, summary, text, warning?, error?} */
+async function extractDocument(savedPath, name, ext) {
+  const cap = (s) => truncate(s, CONFIG.maxAttachmentChars);
+  try {
+    if (ext === '.pdf') {
+      const r = await runPython(path.join(TOOLS_DIR, 'extract_pdf.py'), [savedPath, String(CONFIG.pdfMaxPages)]);
+      if (!r.ok) return r;
+      const summary = `PDF · 共 ${r.pages} 页${r.truncated ? `（已提取前 ${r.extracted_pages} 页）` : ''}`;
+      if (!r.has_text) return { ok: true, kind: 'pdf', summary, text: '', warning: r.warning };
+      return { ok: true, kind: 'pdf', summary, text: cap(r.text), truncated: r.truncated };
+    }
+    if (ext === '.xlsx' || ext === '.xls') {
+      const r = await runPython(path.join(TOOLS_DIR, 'extract_xlsx.py'), [savedPath, String(CONFIG.xlsxMaxRows)]);
+      if (!r.ok) return r;
+      const parts = [];
+      for (const s of r.sheets) {
+        parts.push(`### Sheet「${s.name}」（${s.rows} 行 × ${s.cols} 列${s.truncated ? `，仅提取前 ${CONFIG.xlsxMaxRows} 行` : ''}）\n\n${s.table}`);
+      }
+      return {
+        ok: true,
+        kind: 'xlsx',
+        summary: `Excel · ${r.sheets.length} 个 Sheet${r.sheets.map((s) => `「${s.name}」`).join('')}`,
+        text: cap(parts.join('\n\n')),
+        note: '公式显示为计算值；合并单元格仅左上角有值',
+      };
+    }
+    if (FASTA_EXT.includes(ext)) {
+      const raw = fs.readFileSync(savedPath, 'utf8');
+      const { count, stats, seqs } = parseFasta(raw);
+      if (!count) return { ok: false, error: '未识别到 FASTA 序列（缺少以 > 开头的注释行），请检查文件格式' };
+      const statLines = stats.map((s) => `| ${s.id} | ${s.length} | ${s.gc} |`).join('\n');
+      const seqLines = seqs
+        .slice(0, 10)
+        .map((s) => `> ${s.desc}\n${s.seq.length > 2000 ? s.seq.slice(0, 2000) + '…(截断)' : s.seq}`)
+        .join('\n\n');
+      return {
+        ok: true,
+        kind: 'fasta',
+        summary: `FASTA · ${count} 条序列`,
+        text: cap(`序列统计（ID | 长度 | GC 含量）：\n| ID | 长度 | GC |\n| --- | --- | --- |\n${statLines}\n\n序列内容（最多展示前 10 条）：\n${seqLines}${count > 10 ? `\n…(其余 ${count - 10} 条略)` : ''}`),
+      };
+    }
+    // 其余按纯文本处理（txt/md/csv/json）
+    const raw = fs.readFileSync(savedPath, 'utf8');
+    const isJson = ext === '.json';
+    if (isJson) {
+      try { JSON.parse(raw); } catch { return { ok: false, error: 'JSON 文件格式不合法，无法解析' }; }
+    }
+    return {
+      ok: true,
+      kind: 'text',
+      summary: `${ext.replace('.', '').toUpperCase()} · ${raw.length} 字符${raw.length > CONFIG.maxAttachmentChars ? '（已截断）' : ''}`,
+      text: cap(raw),
+    };
+  } catch (e) {
+    return { ok: false, error: `文件读取失败：${e.message}` };
+  }
+}
+
 /* ---------------------------- GLM 流式调用 ---------------------------- */
 
 const SYSTEM_PROMPT = `你是一个运行在用户电脑上的智能 Agent（类似 DeepSeek Harness 的代理运行时），你的工作目录是 "${WORKSPACE_DIR}"。
@@ -211,8 +321,9 @@ const SYSTEM_PROMPT = `你是一个运行在用户电脑上的智能 Agent（类
 使用原则：
 1. 简单闲聊或知识问答直接回答，不必调用工具。
 2. 涉及文件、命令、代码验证、数据处理等实际操作时，先思考计划，再调用工具，并根据工具结果继续或总结。
-3. 工具输出可能被截断，注意甄别。
-4. 默认使用中文回答。回答使用 Markdown 格式，代码用代码块包裹。
+3. 用户消息可能附带 [附件 ...] 块（PDF/Excel/FASTA/文本的提取内容）：优先依据附件内容回答；若提取内容被截断或需要更多细节，可用 read_file 读取附件的完整原始文件（附件块中给出了工作区路径）。图片附件会直接出现在消息里，用视觉能力理解它。
+4. 工具输出可能被截断，注意甄别。
+5. 默认使用中文回答。回答使用 Markdown 格式，代码用代码块包裹。
 
 【需求不明确时必须澄清】
 当用户的需求模糊、存在多种合理理解、或缺少关键参数时，不要猜测着直接动手。先输出一个选项卡片向用户提问，格式为（严格遵守，便于前端解析）：
@@ -334,6 +445,12 @@ function toApiMessages(convMessages, visionModel) {
   convMessages.forEach((m, i) => {
     if (m.role === 'user') {
       let text = m.content;
+      // 附件提取文本注入（原始文件已存于工作区，模型可用 read_file 深入查看）
+      for (const a of m.attachments || []) {
+        text += `\n\n[附件 ${a.name}${a.summary ? '：' + a.summary : ''}${a.path ? `（工作区路径 ${a.path}）` : ''}]`;
+        if (a.text) text += `\n<附件内容>\n${a.text}\n</附件内容>`;
+        else if (a.summary) text += `\n（该附件无可注入的文本内容）`;
+      }
       if (m.images?.length && !keepImg.has(i)) text = (text || '') + '\n[注：用户曾发送过图片，因对话过长已省略]';
       if (m.images?.length && keepImg.has(i) && visionModel) {
         out.push({
@@ -392,7 +509,14 @@ function validateImages(images, model) {
  */
 async function runAgent(conv, userText, model, onEvent, isAborted, opts = {}) {
   const planMode = opts.mode === 'plan';
-  const userMsg = { id: crypto.randomUUID(), role: 'user', content: userText, images: opts.images || [], ts: Date.now() };
+  const userMsg = {
+    id: crypto.randomUUID(),
+    role: 'user',
+    content: userText,
+    images: opts.images || [],
+    attachments: opts.attachments || [],
+    ts: Date.now(),
+  };
   conv.messages.push(userMsg);
   if (conv.messages.filter((m) => m.role === 'user').length === 1) {
     conv.title = userText.replace(/\s+/g, ' ').slice(0, 24) || '新对话';
@@ -556,6 +680,34 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (pathname === '/api/upload' && req.method === 'POST') {
+    const body = await readBody(req);
+    const name = String(body.name || '').replace(/[\\/:*?"<>|]/g, '_').slice(0, 120);
+    const b64 = String(body.data || '').split(',').pop();
+    if (!name || !b64) return sendJson(res, 400, { error: '上传内容为空' });
+    const ext = path.extname(name).toLowerCase();
+    if (!UPLOAD_ALLOWED_EXT.includes(ext)) {
+      return sendJson(res, 400, { error: `不支持的文件类型「${ext || name}」。支持：${UPLOAD_ALLOWED_EXT.join(' / ')}` });
+    }
+    const buf = Buffer.from(b64, 'base64');
+    if (!buf.length) return sendJson(res, 400, { error: '文件内容为空或已损坏' });
+    if (buf.length > CONFIG.uploadMaxBytes) {
+      return sendJson(res, 400, { error: `文件过大（${(buf.length / 1048576).toFixed(1)}MB），上限 ${Math.round(CONFIG.uploadMaxBytes / 1048576)}MB` });
+    }
+    const upDir = path.join(WORKSPACE_DIR, 'uploads');
+    fs.mkdirSync(upDir, { recursive: true });
+    const saved = `${Date.now()}_${name}`;
+    const savedPath = path.join(upDir, saved);
+    fs.writeFileSync(savedPath, buf);
+    const extraction = await extractDocument(savedPath, name, ext);
+    return sendJson(res, 200, {
+      name,
+      path: `uploads/${saved}`,
+      size: buf.length,
+      extraction,
+    });
+  }
+
   if (pathname === '/api/chat' && req.method === 'POST') {
     if (!CONFIG.apiKey) {
       return sendJson(res, 500, { error: '未配置 GLM_API_KEY，请在项目根目录 .env 中填写后重启服务' });
@@ -574,6 +726,14 @@ const server = http.createServer(async (req, res) => {
     const imgErr = validateImages(body.images, model);
     if (imgErr) return sendJson(res, imgErr.code, { error: imgErr.error });
 
+    // 附件校验与清洗（由 /api/upload 产出）
+    const attachments = Array.isArray(body.attachments) ? body.attachments.slice(0, 4).map((a) => ({
+      name: String(a?.name || '附件').slice(0, 120),
+      path: String(a?.path || '').slice(0, 300),
+      summary: String(a?.summary || '').slice(0, 200),
+      text: String(a?.text || '').slice(0, CONFIG.maxAttachmentChars),
+    })) : [];
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-store',
@@ -588,7 +748,7 @@ const server = http.createServer(async (req, res) => {
     req.on('close', () => { clientGone = true; });
 
     try {
-      await runAgent(conv, userText, model, send, () => clientGone || res.writableEnded, { mode, images: body.images });
+      await runAgent(conv, userText, model, send, () => clientGone || res.writableEnded, { mode, images: body.images, attachments });
     } catch (e) {
       console.error('[agent] 出错:', e);
       send({ type: 'error', message: e.message || String(e) });

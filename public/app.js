@@ -32,6 +32,7 @@
     pinned: true,
     planMode: false,
     images: [], // 待发送图片 dataURL 列表
+    files: [],  // 待发送文档附件（/api/upload 产物）
   };
 
   /* ---------------- Markdown ---------------- */
@@ -376,12 +377,24 @@
     return { wrap, body };
   }
 
-  function makeUserBubble(text, images = []) {
+  function makeUserBubble(text, images = [], files = []) {
     const wrap = document.createElement('div');
     wrap.className = 'msg-user';
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = text;
+    if (files.length) {
+      const list = document.createElement('div');
+      list.className = 'bubble-files';
+      for (const f of files) {
+        const chip = document.createElement('div');
+        chip.className = 'file-chip small' + (f.extraction?.ok === false ? ' err' : '');
+        chip.textContent = `📄 ${f.name}${f.extraction?.summary ? ' · ' + f.extraction.summary : ''}`;
+        if (f.extraction?.warning) chip.title = f.extraction.warning;
+        list.appendChild(chip);
+      }
+      bubble.appendChild(list);
+    }
     if (images.length) {
       const grid = document.createElement('div');
       grid.className = 'bubble-images';
@@ -434,7 +447,7 @@
 
     for (const msg of conv.messages) {
       if (msg.role === 'user') {
-        el.chat.appendChild(makeUserBubble(msg.content, msg.images || []));
+        el.chat.appendChild(makeUserBubble(msg.content, msg.images || [], msg.attachments || []));
         agentBody = null;
       } else if (msg.role === 'assistant') {
         if (!agentBody) {
@@ -579,7 +592,8 @@
   async function sendMessage(modeOverride) {
     const text = el.input.value.trim();
     const images = state.images.slice();
-    if (!text && !images.length) return;
+    const files = state.files.slice();
+    if (!text && !images.length && !files.length) return;
     if (state.streaming) return;
     const mode = modeOverride === 'chat' || modeOverride === 'plan' ? modeOverride : state.planMode ? 'plan' : 'chat';
 
@@ -591,9 +605,10 @@
 
     // 清掉空状态 / 追加用户气泡
     if (!el.chat.querySelector('.msg-user, .msg-agent')) el.chat.innerHTML = '';
-    el.chat.appendChild(makeUserBubble(text, images));
+    el.chat.appendChild(makeUserBubble(text, images, files));
     el.input.value = '';
     state.images = [];
+    state.files = [];
     renderAttachBar();
     autoGrow();
     scrollBottom(true);
@@ -655,6 +670,12 @@
           model: el.modelSelect.value || state.config.model,
           mode,
           images,
+          attachments: files.map((f) => ({
+            name: f.name,
+            path: f.path,
+            summary: f.extraction?.summary || '',
+            text: f.extraction?.text || '',
+          })),
         }),
         signal: state.abortCtrl.signal,
       });
@@ -750,10 +771,11 @@
     }
   }
 
-  /* ---------------- 附件（图片）上传 ---------------- */
+  /* ---------------- 附件上传（图片 / 文档） ---------------- */
 
   const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
   const IMAGE_MAX_MB = 5;
+  const DOC_EXTS = ['.pdf', '.xlsx', '.xls', '.csv', '.txt', '.md', '.json', '.fasta', '.fa', '.fas'];
 
   function toast(msg, kind = 'info') {
     let host = document.querySelector('#toast-host');
@@ -772,21 +794,54 @@
   function renderAttachBar() {
     const bar = el.attachBar;
     bar.innerHTML = '';
-    bar.hidden = state.images.length === 0;
-    state.images.forEach((src, i) => {
-      const chip = document.createElement('div');
-      chip.className = 'img-chip';
-      const img = document.createElement('img');
-      img.src = src;
-      const del = document.createElement('button');
-      del.type = 'button';
-      del.className = 'img-del';
-      del.textContent = '×';
-      del.title = '移除图片';
-      del.addEventListener('click', () => { state.images.splice(i, 1); renderAttachBar(); });
-      chip.append(img, del);
-      bar.appendChild(chip);
-    });
+    const items = [
+      ...state.images.map((src, i) => ({ kind: 'image', src, i })),
+      ...state.files.map((f, i) => ({ kind: 'file', f, i })),
+    ];
+    bar.hidden = items.length === 0;
+    for (const it of items) {
+      if (it.kind === 'image') {
+        const chip = document.createElement('div');
+        chip.className = 'img-chip';
+        const img = document.createElement('img');
+        img.src = it.src;
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'img-del';
+        del.textContent = '×';
+        del.title = '移除图片';
+        del.addEventListener('click', () => { state.images.splice(it.i, 1); renderAttachBar(); });
+        chip.append(img, del);
+        bar.appendChild(chip);
+      } else {
+        const f = it.f;
+        const chip = document.createElement('div');
+        chip.className = 'file-chip' + (f.extraction?.ok === false ? ' err' : '');
+        const icon = document.createElement('span');
+        icon.className = 'fc-icon';
+        icon.textContent = '📄';
+        const info = document.createElement('div');
+        info.className = 'fc-info';
+        const nm = document.createElement('div');
+        nm.className = 'fc-name';
+        nm.textContent = f.name;
+        const sm = document.createElement('div');
+        sm.className = 'fc-summary';
+        sm.textContent = f.extraction?.ok === false
+          ? (f.extraction.error || '解析失败')
+          : `${f.extraction?.summary || ''}${f.extraction?.warning ? ' ⚠' : ''}`;
+        info.append(nm, sm);
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'img-del';
+        del.textContent = '×';
+        del.title = '移除附件';
+        del.addEventListener('click', () => { state.files.splice(it.i, 1); renderAttachBar(); });
+        chip.append(icon, info, del);
+        if (f.extraction?.warning) chip.title = f.extraction.warning;
+        bar.appendChild(chip);
+      }
+    }
   }
 
   function readAsDataURL(file) {
@@ -798,28 +853,49 @@
     });
   }
 
+  async function uploadDocument(file) {
+    const data = await readAsDataURL(file);
+    const res = await fetch('/api/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: file.name, mimeType: file.type, data }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(out.error || `上传失败（HTTP ${res.status}）`);
+    return out; // {name, path, size, extraction}
+  }
+
   el.attachBtn?.addEventListener('click', () => el.attachInput.click());
   el.attachInput?.addEventListener('change', async () => {
     const files = [...(el.attachInput.files || [])];
     el.attachInput.value = '';
     for (const f of files) {
-      if (!IMAGE_TYPES.includes(f.type)) {
-        toast(`「${f.name}」不是支持的图片格式（仅 PNG / JPG / WEBP）`, 'error');
+      const isImage = IMAGE_TYPES.includes(f.type);
+      const ext = '.' + (f.name.split('.').pop() || '').toLowerCase();
+      if (!isImage && !DOC_EXTS.includes(ext)) {
+        toast(`「${f.name}」类型不支持（图片：PNG/JPG/WEBP；文档：${DOC_EXTS.join('/')}）`, 'error');
         continue;
       }
-      if (f.size > IMAGE_MAX_MB * 1024 * 1024) {
-        toast(`「${f.name}」过大（${(f.size / 1048576).toFixed(1)}MB），单张上限 ${IMAGE_MAX_MB}MB`, 'error');
-        continue;
-      }
-      if (state.images.length >= 4) {
-        toast('单条消息最多 4 张图片', 'error');
-        break;
-      }
-      try {
-        const url = await readAsDataURL(f);
-        state.images.push(url);
-      } catch (e) {
-        toast(`「${f.name}」${e.message}`, 'error');
+      if (isImage) {
+        if (f.size > IMAGE_MAX_MB * 1024 * 1024) {
+          toast(`「${f.name}」过大（${(f.size / 1048576).toFixed(1)}MB），单张上限 ${IMAGE_MAX_MB}MB`, 'error');
+          continue;
+        }
+        if (state.images.length >= 4) { toast('单条消息最多 4 张图片', 'error'); break; }
+        try {
+          state.images.push(await readAsDataURL(f));
+        } catch (e) { toast(`「${f.name}」${e.message}`, 'error'); }
+      } else {
+        if (state.files.length >= 4) { toast('单条消息最多 4 个文档', 'error'); break; }
+        if (f.size > 10 * 1024 * 1024) { toast(`「${f.name}」过大（上限 10MB）`, 'error'); continue; }
+        try {
+          const out = await uploadDocument(f);
+          state.files.push(out);
+          if (out.extraction?.ok === false) toast(`「${f.name}」${out.extraction.error}`, 'error');
+          else if (out.extraction?.warning) toast(`「${f.name}」${out.extraction.warning}`, 'info');
+        } catch (e) {
+          toast(`「${f.name}」${e.message}`, 'error');
+        }
       }
     }
     renderAttachBar();

@@ -822,6 +822,55 @@ body {
 
 .tool-icon-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+/* ---- 文档附件 chip ---- */
+.file-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 9px;
+  padding: 6px 10px;
+  max-width: 300px;
+}
+
+.file-chip.err { border-color: #f3b5b7; background: #fdf3f3; }
+
+.file-chip .fc-icon { font-size: 16px; }
+
+.file-chip .fc-info { flex: 1; min-width: 0; }
+
+.file-chip .fc-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-chip .fc-summary {
+  font-size: 11.5px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-chip.err .fc-summary { color: var(--danger); }
+
+.file-chip.small {
+  display: inline-flex;
+  font-size: 12px;
+  color: var(--text-2);
+  padding: 4px 10px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bubble-files { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; align-items: flex-end; }
+
 #toast-host {
   position: fixed;
   top: 18px;
