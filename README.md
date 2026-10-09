@@ -8,18 +8,32 @@ GLM 开放平台（智谱 BigModel）的 OpenAI 兼容接口驱动 `glm` 系列�
 
 ![界面预览：深度思考卡片 + 命令/工具卡片 + Markdown 回答](docs/screenshot.png)
 
-## ✨ 功能特性
+![v2 功能：选项卡片 + 计划卡片 + 图片上传](docs/screenshot-v2.png)
 
-- 💬 **网页对话** —— GLM 网页版风格 UI：多会话侧边栏、Markdown 渲染、代码高亮、一键复制
-- 🧠 **思考链展示** —— 流式展示模型 `reasoning_content`，折叠式“深度思考”卡片，显示思考用时
-- 🛠 **工具调用（Harness）** —— Agent 可在本地工作区中：
-  - `run_command`：执行 shell 命令（Windows / macOS / Linux）
-  - `read_file` / `write_file` / `list_dir`：读写工作区文件（路径越界保护）
-  - 每次调用都会以命令卡片形式展示命令与输出
-- 🌊 **全链路流式** —— SSE 推送：思考 → 工具 → 回答，支持随时停止生成
-- 🗂 **会话持久化** —— 服务端 JSON 存储，刷新页面不丢历史
-- ⚙️ **模型切换** —— 顶栏下拉切换 `glm-5.3` / `glm-4.6` / `glm-4.5-flash` 等
-- 📦 **零依赖后端** —— 纯 Node.js 内置模块，`marked` / `highlight.js` 已本地 vendored，离线可用
+## 🧪 运行测试
+
+```bash
+python tests/fixtures_gen.py   # 生成测试夹具（需 pypdf/openpyxl/Pillow）
+node tests/e2e.mjs             # 全量 E2E（需服务已启动）
+ONLY=T6 node tests/e2e.mjs     # 只跑某一组（T1~T6）
+```
+
+## ✨ 功能特性与验证状态
+
+> 2026-10-09 功能验证：E2E 22/22 通过（`tests/e2e.mjs`，真实 API：glm-4.5-flash / glm-4v-flash）
+
+| 功能 | 说明 | 状态 |
+| --- | --- | --- |
+| 💬 网页对话 | GLM 网页版风格，多会话侧边栏、Markdown/代码高亮、复制 | ✅ 已验证 |
+| 🧠 思考链 | 流式 `reasoning_content`，折叠卡片 + 思考用时 | ✅ 已验证 |
+| 🛠 命令/工具卡片 | `run_command` / `read_file` / `write_file` / `list_dir`，工作区沙箱 | ✅ 已验证 |
+| 🧭 计划模式 | 规划回合无工具可调（阻塞），计划卡片确认后才执行 | ✅ 已验证 |
+| 🖼 图片上传 | PNG/JPG/WEBP，≤5MB×4 张，`glm-4v-flash` 视觉理解，错误提示友好 | ✅ 已验证 |
+| 📄 文件解析 | PDF（文本层，扫描件明确提示不支持 OCR）、Excel（多 sheet/公式值/合并单元格）、FASTA（序列统计）、CSV/TXT/MD/JSON | ✅ 已验证 |
+| 🔁 多轮上下文 | 6 轮指代消解通过；>40 条自动截断中段（保留任务背景） | ✅ 已验证 |
+| 🌐 联网查询 | `web_search` 工具，DDG→Bing 降级，10s 超时，结果可溯源 | ✅ 已验证 |
+| ❓ 需求澄清 | 模糊需求输出 2-4 个互斥选项（单选/多选/自定义），先问后做 | ✅ 已验证 |
+| 🗂 会话持久化 | 服务端 JSON 存储 | ✅ 已验证 |
 
 ## 🚀 快速开始
 
@@ -46,6 +60,14 @@ node server.js          # 或 npm start
 | `GLM_MODEL` | `glm-5.3` | 默认模型 |
 | `GLM_MODELS` | `glm-5.3,glm-4.6,...` | 界面可切换的模型列表 |
 | `PORT` | `3210` | 服务端口 |
+| `GLM_VISION_MODELS` | `glm-4v-flash,glm-4.5v,glm-4.6v` | 支持图片输入的视觉模型 |
+| `IMAGE_MAX_BYTES` | `5242880` | 单张图片大小上限 |
+| `UPLOAD_MAX_BYTES` | `10485760` | 文档上传大小上限 |
+| `PDF_MAX_PAGES` | `30` | PDF 最大提取页数 |
+| `XLSX_MAX_ROWS` | `200` | Excel 每 sheet 最大提取行数 |
+| `MAX_ATTACHMENT_CHARS` | `8000` | 附件注入上下文的最大字符数 |
+| `CONTEXT_WINDOW_MESSAGES` | `40` | 超过则截断中段历史 |
+| `PYTHON_BIN` | `python` | PDF/Excel 解析所用 Python（需 pypdf、openpyxl） |
 | `AGENT_MAX_STEPS` | `8` | 单轮对话最大工具调用步数 |
 | `CMD_TIMEOUT_MS` | `30000` | 单条命令超时 |
 | `MAX_TOOL_OUTPUT` | `6000` | 工具输出最大字符数（超出截断） |
