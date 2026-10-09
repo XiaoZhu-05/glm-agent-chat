@@ -54,6 +54,10 @@ const CONFIG = {
   maxTokens: parseInt(process.env.GLM_MAX_TOKENS || '8192', 10),
   // 各模型 max_tokens 上限不同（如 glm-4v-flash 上限 1024），未列出的用全局默认
   maxTokensByModel: { 'glm-4v-flash': 1024 },
+  // BioNeMo（NVIDIA NIM 云端 ESMFold）
+  nvidiaApiKey: process.env.NVIDIA_API_KEY || '',
+  nimBaseUrl: (process.env.NIM_BASE_URL || 'https://health.api.nvidia.com/v1/biology/nvidia/esmfold').replace(/\/+$/, ''),
+  nimTimeoutMs: parseInt(process.env.NIM_TIMEOUT_MS || '120000', 10),
   maxSteps: parseInt(process.env.AGENT_MAX_STEPS || '8', 10),
   cmdTimeoutMs: parseInt(process.env.CMD_TIMEOUT_MS || '30000', 10),
   maxToolOutput: parseInt(process.env.MAX_TOOL_OUTPUT || '6000', 10),
@@ -185,6 +189,20 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'protein_structure',
+      description: '蛋白质三维结构预测（NVIDIA BioNeMo ESMFold，NIM 云端服务）。输入单字母氨基酸序列，返回预测的三级结构并保存为 PDB 文件到工作区。适合「预测蛋白结构 / 建模 / 折叠」类请求；序列上限 1024 个氨基酸；会自动去除 FASTA 的 > 注释行与空白。',
+      parameters: {
+        type: 'object',
+        properties: {
+          sequence: { type: 'string', description: '氨基酸单字母序列，如 MVHLTPEEKSAVTALWGKVNVDEVGGEALGRLLVVYPWTQRFF（可直接粘贴含 > 注释行的 FASTA）' },
+        },
+        required: ['sequence'],
+      },
+    },
+  },
 ];
 
 function runCommand(command) {
@@ -221,6 +239,8 @@ async function executeTool(name, args) {
     }
     case 'web_search':
       return webSearch(args.query || '');
+    case 'protein_structure':
+      return predictProteinStructure(args.sequence || '');
     default:
       throw new Error(`未知工具：${name}`);
   }
@@ -419,6 +439,75 @@ async function webSearch(query) {
     }
   }
   throw new Error(`联网搜索失败（${errors.join('；')}）。可能是网络不可达或被搜索引擎限流，请稍后重试或改用本地资料。`);
+}
+
+/* ---------------------------- BioNeMo（蛋白质结构预测） ---------------------------- */
+
+const AA_SEQ_RE = /^[ARNDCQEGHILKMFPSTWYVXBOU]+$/;
+
+/** 从 NIM 响应（结构未知）中递归找 PDB 文本（含 ATOM 与 END 记录的长字符串） */
+function findPdbInResponse(o) {
+  if (typeof o === 'string') return o.includes('ATOM') && o.includes('END') ? o : null;
+  if (Array.isArray(o)) {
+    for (const v of o) { const r = findPdbInResponse(v); if (r) return r; }
+    return null;
+  }
+  if (o && typeof o === 'object') {
+    for (const v of Object.values(o)) { const r = findPdbInResponse(v); if (r) return r; }
+  }
+  return null;
+}
+
+/** protein_structure 工具实现：调 BioNeMo ESMFold NIM，PDB 存工作区，返回摘要 */
+async function predictProteinStructure(rawSequence) {
+  if (!CONFIG.nvidiaApiKey) {
+    throw new Error('未配置 NVIDIA_API_KEY：请到 https://build.nvidia.com 免费注册获取 API Key（nvapi- 开头），填入项目根目录 .env 的 NVIDIA_API_KEY= 后重启服务即可启用蛋白结构预测。');
+  }
+  // 清洗：去 FASTA 注释行与全部空白，转大写
+  const seq = String(rawSequence || '')
+    .split(/\r?\n/)
+    .filter((l) => !l.trim().startsWith('>'))
+    .join('')
+    .replace(/\s+/g, '')
+    .toUpperCase();
+  if (!seq) throw new Error('氨基酸序列为空。请提供单字母氨基酸序列（如 MVHLTPEEKSAVTALWGK...）');
+  if (seq.length > 1024) throw new Error(`序列长度 ${seq.length} 超过 ESMFold 上限 1024 个氨基酸，请截断或分段预测`);
+  if (!AA_SEQ_RE.test(seq)) throw new Error('序列包含非法字符（仅允许 20 种标准氨基酸单字母及 X/B/O/U）。请确认输入的是蛋白质序列而非核酸或含数字的文本');
+
+  let res;
+  try {
+    res = await fetchWithTimeout(CONFIG.nimBaseUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${CONFIG.nvidiaApiKey}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ sequence: seq }),
+    }, CONFIG.nimTimeoutMs);
+  } catch (e) {
+    const reason = /abort/i.test(e.name || '') ? `请求超时（>${CONFIG.nimTimeoutMs / 1000}s），结构预测较慢可稍后重试或在 .env 调大 NIM_TIMEOUT_MS` : e.message;
+    throw new Error(`BioNeMo NIM 请求失败：${reason}`);
+  }
+  if (res.status === 401 || res.status === 403) throw new Error(`NVIDIA_API_KEY 无效或未授权（HTTP ${res.status}），请检查 .env 中的 key`);
+  if (res.status === 429) throw new Error('BioNeMo NIM 限流（HTTP 429），请稍后重试');
+  if (!res.ok) throw new Error(`BioNeMo NIM 服务错误（HTTP ${res.status}）：${(await res.text().catch(() => '')).slice(0, 200)}`);
+
+  const data = await res.json().catch(() => null);
+  const pdb = data ? findPdbInResponse(data) : null;
+  if (!pdb) {
+    const rawFile = `pdb/esmfold_raw_${Date.now()}.json`;
+    const rawPath = path.join(WORKSPACE_DIR, rawFile);
+    fs.mkdirSync(path.dirname(rawPath), { recursive: true });
+    fs.writeFileSync(rawPath, JSON.stringify(data ?? { note: '空响应' }, null, 2), 'utf8');
+    throw new Error(`未能从 NIM 响应中解析出 PDB 结构（原始响应已存 workspace/${rawFile} 供排查）`);
+  }
+  const file = `pdb/esmfold_${Date.now()}.pdb`;
+  const fp = path.join(WORKSPACE_DIR, file);
+  fs.mkdirSync(path.dirname(fp), { recursive: true });
+  fs.writeFileSync(fp, pdb, 'utf8');
+  const atoms = (pdb.match(/^ATOM/gm) || []).length;
+  return `结构预测成功。\n- 输入序列：${seq.length} 个氨基酸\n- ATOM 记录：${atoms} 条\n- PDB 文件已保存：workspace/${file}\n（可用 read_file 查看完整 PDB 内容）`;
 }
 
 /* ---------------------------- GLM 流式调用 ---------------------------- */
