@@ -223,6 +223,20 @@ const SYSTEM_PROMPT = `你是一个运行在用户电脑上的智能 Agent（类
 - 输出选项卡片后立即停止，等待用户选择，不要自问自答。
 - 需求已经明确时不要滥用此功能，直接执行。`;
 
+const PLAN_PROMPT_SUFFIX = `
+
+【规划模式（当前生效）】
+你现在处于规划模式：只制定计划，绝不执行任何操作。
+- 本次对话不提供任何工具，禁止尝试调用工具。
+- 阅读用户需求后，产出一份清晰可执行的计划，计划主体必须放在一个 \`\`\`plan 代码块中，格式为 JSON：
+
+\`\`\`plan
+{"title": "计划标题", "goal": "一句话目标", "steps": [{"action": "步骤概述", "detail": "具体做法/涉及的命令或文件"}], "risks": ["风险与注意点"], "estimated": "预计用到的工具"}
+\`\`\`
+
+- 代码块之外可以有简短的开场说明，但计划内容必须完整、严格符合上述 JSON 结构（steps 至少 2 条， risks 可为空数组）。
+- 如果需求本身不清楚，优先用 \`\`\`options 卡片向用户提问，而不是给出基于猜测的计划。`;
+
 /**
  * 调 GLM chat/completions（stream），异步产出事件：
  *   {type:'reasoning', delta} {type:'content', delta} {type:'usage', usage}
@@ -335,7 +349,8 @@ function toApiMessages(convMessages) {
  * onEvent 会收到（全部最终转发给前端 SSE）：
  *   reasoning / content / tool_call / tool_result / step / done / error
  */
-async function runAgent(conv, userText, model, onEvent, isAborted) {
+async function runAgent(conv, userText, model, onEvent, isAborted, opts = {}) {
+  const planMode = opts.mode === 'plan';
   const userMsg = { id: crypto.randomUUID(), role: 'user', content: userText, ts: Date.now() };
   conv.messages.push(userMsg);
   if (conv.messages.filter((m) => m.role === 'user').length === 1) {
@@ -343,8 +358,10 @@ async function runAgent(conv, userText, model, onEvent, isAborted) {
   }
 
   const apiMessages = toApiMessages(conv.messages);
+  if (planMode) apiMessages[0].content += PLAN_PROMPT_SUFFIX;
+  const activeTools = planMode ? [] : TOOLS;
 
-  for (let step = 0; step < CONFIG.maxSteps; step++) {
+  for (let step = 0; step < (planMode ? 1 : CONFIG.maxSteps); step++) {
     if (isAborted && isAborted()) {
       const stopped = {
         id: crypto.randomUUID(),
@@ -360,7 +377,7 @@ async function runAgent(conv, userText, model, onEvent, isAborted) {
       return;
     }
     onEvent({ type: 'step', index: step + 1 });
-    const r = await streamCompletion(apiMessages, TOOLS, model, onEvent);
+    const r = await streamCompletion(apiMessages, activeTools, model, onEvent);
 
     const assistantMsg = {
       id: crypto.randomUUID(),
@@ -509,6 +526,7 @@ const server = http.createServer(async (req, res) => {
     if (!conv) conv = newConversation();
     conv.updatedAt = Date.now();
     const model = CONFIG.models.includes(body.model) || body.model ? String(body.model || CONFIG.model) : CONFIG.model;
+    const mode = body.mode === 'plan' ? 'plan' : 'chat';
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -524,7 +542,7 @@ const server = http.createServer(async (req, res) => {
     req.on('close', () => { clientGone = true; });
 
     try {
-      await runAgent(conv, userText, model, send, () => clientGone || res.writableEnded);
+      await runAgent(conv, userText, model, send, () => clientGone || res.writableEnded, { mode });
     } catch (e) {
       console.error('[agent] 出错:', e);
       send({ type: 'error', message: e.message || String(e) });

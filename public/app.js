@@ -17,6 +17,7 @@
     stopBtn: $('#stop-btn'),
     keyStatus: $('#key-status'),
     workspacePath: $('#workspace-path'),
+    planToggle: $('#plan-toggle'),
   };
 
   const state = {
@@ -26,6 +27,7 @@
     streaming: false,
     abortCtrl: null,
     pinned: true,
+    planMode: false,
   };
 
   /* ---------------- Markdown ---------------- */
@@ -113,7 +115,88 @@
     renderMarkdownInto(container, clean);
     for (const b of blocks) {
       if (b.kind === 'options') container.appendChild(makeOptionsCard(b.data, opts));
+      if (b.kind === 'plan') container.appendChild(makePlanCard(b.data, opts));
     }
+  }
+
+  /** 计划卡片：确认前阻塞执行；确认后以执行模式重发，放弃则标记 */
+  function makePlanCard(data, opts = {}) {
+    const card = document.createElement('div');
+    card.className = 'plan-card';
+    const head = document.createElement('div');
+    head.className = 'plan-head';
+    head.innerHTML = `<span class="plan-icon">🧭</span><span class="plan-title"></span><span class="plan-state"></span>`;
+    head.querySelector('.plan-title').textContent = data.title || '执行计划';
+    card.appendChild(head);
+
+    if (data.goal) {
+      const goal = document.createElement('div');
+      goal.className = 'plan-goal';
+      goal.textContent = '目标：' + data.goal;
+      card.appendChild(goal);
+    }
+
+    const steps = document.createElement('ol');
+    steps.className = 'plan-steps';
+    (data.steps || []).forEach((s) => {
+      const li = document.createElement('li');
+      const a = document.createElement('div');
+      a.className = 'ps-action';
+      a.textContent = s.action || '';
+      if (s.detail) {
+        const d = document.createElement('div');
+        d.className = 'ps-detail';
+        d.textContent = s.detail;
+        a.appendChild(d);
+      }
+      li.appendChild(a);
+      steps.appendChild(li);
+    });
+    card.appendChild(steps);
+
+    if (Array.isArray(data.risks) && data.risks.length) {
+      const risks = document.createElement('div');
+      risks.className = 'plan-risks';
+      risks.innerHTML = '<b>⚠ 风险与注意</b>';
+      const ul = document.createElement('ul');
+      data.risks.forEach((r) => {
+        const li = document.createElement('li');
+        li.textContent = r;
+        ul.appendChild(li);
+      });
+      risks.appendChild(ul);
+      card.appendChild(risks);
+    }
+
+    const stateEl = head.querySelector('.plan-state');
+    const setState = (t, cls) => { stateEl.textContent = t; stateEl.className = 'plan-state ' + (cls || ''); };
+
+    if (opts.interactive) {
+      const row = document.createElement('div');
+      row.className = 'plan-actions';
+      const ok = document.createElement('button');
+      ok.type = 'button';
+      ok.className = 'plan-ok';
+      ok.textContent = '✓ 按此计划执行';
+      ok.addEventListener('click', () => {
+        setState('已确认', 'ok');
+        row.remove();
+        if (el.planToggle) { state.planMode = false; el.planToggle.classList.remove('on'); }
+        el.input.value = `请按以下已确认的计划执行（无需再次确认）：\n${JSON.stringify(data, null, 2)}`;
+        sendMessage('chat');
+      });
+      const no = document.createElement('button');
+      no.type = 'button';
+      no.className = 'plan-no';
+      no.textContent = '✕ 放弃计划';
+      no.addEventListener('click', () => {
+        setState('已放弃', 'no');
+        row.remove();
+      });
+      row.append(ok, no);
+      card.appendChild(row);
+    }
+    return card;
   }
 
   /** 澄清选项卡片：单选（点击即发送）/ 多选（勾选后提交）/ 自定义输入 */
@@ -477,9 +560,10 @@
     setStreaming(false);
   }
 
-  async function sendMessage() {
+  async function sendMessage(modeOverride) {
     const text = el.input.value.trim();
     if (!text || state.streaming) return;
+    const mode = modeOverride === 'chat' || modeOverride === 'plan' ? modeOverride : state.planMode ? 'plan' : 'chat';
 
     // 清掉空状态 / 追加用户气泡
     if (!el.chat.querySelector('.msg-user, .msg-agent')) el.chat.innerHTML = '';
@@ -543,6 +627,7 @@
           message: text,
           conversationId: state.currentConvId,
           model: el.modelSelect.value || state.config.model,
+          mode,
         }),
         signal: state.abortCtrl.signal,
       });
@@ -653,9 +738,16 @@
     }
   });
 
-  el.sendBtn.addEventListener('click', sendMessage);
+  el.sendBtn.addEventListener('click', () => sendMessage());
   el.stopBtn.addEventListener('click', stopStreaming);
   el.newChatBtn.addEventListener('click', newChat);
+  el.planToggle?.addEventListener('click', () => {
+    state.planMode = !state.planMode;
+    el.planToggle.classList.toggle('on', state.planMode);
+    el.input.placeholder = state.planMode
+      ? '规划模式：描述任务，Agent 会先给出计划等你确认'
+      : '给 GLM Agent 发送消息，例如：看看工作区里有什么文件';
+  });
 
   /* ---------------- 初始化 ---------------- */
 
