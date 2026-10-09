@@ -280,8 +280,8 @@ async function extractDocument(savedPath, name, ext) {
       const r = await runPython(path.join(TOOLS_DIR, 'extract_pdf.py'), [savedPath, String(CONFIG.pdfMaxPages)]);
       if (!r.ok) return r;
       const summary = `PDF · 共 ${r.pages} 页${r.truncated ? `（已提取前 ${r.extracted_pages} 页）` : ''}`;
-      if (!r.has_text) return { ok: true, kind: 'pdf', summary, text: '', warning: r.warning };
-      return { ok: true, kind: 'pdf', summary, text: cap(r.text), truncated: r.truncated };
+      if (!r.has_text) return { ok: true, kind: 'pdf', summary, text: '', pages: r.pages, hasText: false, warning: r.warning };
+      return { ok: true, kind: 'pdf', summary, text: cap(r.text), pages: r.pages, hasText: true, truncated: r.truncated };
     }
     if (ext === '.xlsx' || ext === '.xls') {
       const r = await runPython(path.join(TOOLS_DIR, 'extract_xlsx.py'), [savedPath, String(CONFIG.xlsxMaxRows)]);
@@ -295,6 +295,8 @@ async function extractDocument(savedPath, name, ext) {
         kind: 'xlsx',
         summary: `Excel · ${r.sheets.length} 个 Sheet${r.sheets.map((s) => `「${s.name}」`).join('')}`,
         text: cap(parts.join('\n\n')),
+        sheetCount: r.sheets.length,
+        sheetNames: r.sheets.map((s) => s.name),
         note: '公式显示为计算值；合并单元格仅左上角有值',
       };
     }
@@ -311,6 +313,7 @@ async function extractDocument(savedPath, name, ext) {
         ok: true,
         kind: 'fasta',
         summary: `FASTA · ${count} 条序列`,
+        count,
         text: cap(`序列统计（ID | 长度 | GC 含量）：\n| ID | 长度 | GC |\n| --- | --- | --- |\n${statLines}\n\n序列内容（最多展示前 10 条）：\n${seqLines}${count > 10 ? `\n…(其余 ${count - 10} 条略)` : ''}`),
       };
     }
