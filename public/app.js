@@ -92,6 +92,102 @@
   const copyIconSvg =
     '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
 
+  /* ---------------- 特殊内容块（options / plan） ---------------- */
+
+  /** 从回答文本中提取 ```options / ```plan 代码块，返回剩余文本与块列表 */
+  function extractSpecialBlocks(text) {
+    const blocks = [];
+    const re = /```(options|plan)\s*\n([\s\S]*?)```/g;
+    const clean = String(text || '').replace(re, (m, kind, body) => {
+      try {
+        blocks.push({ kind, data: JSON.parse(body.trim()) });
+        return '';
+      } catch { return m; }
+    });
+    return { clean, blocks };
+  }
+
+  /** 渲染回答：Markdown + 特殊卡片（澄清选项等） */
+  function renderAnswerContent(container, rawText, opts = {}) {
+    const { clean, blocks } = extractSpecialBlocks(rawText);
+    renderMarkdownInto(container, clean);
+    for (const b of blocks) {
+      if (b.kind === 'options') container.appendChild(makeOptionsCard(b.data, opts));
+    }
+  }
+
+  /** 澄清选项卡片：单选（点击即发送）/ 多选（勾选后提交）/ 自定义输入 */
+  function makeOptionsCard(data, opts = {}) {
+    const card = document.createElement('div');
+    card.className = 'options-card';
+    const q = document.createElement('div');
+    q.className = 'opt-q';
+    q.textContent = (data.question || '请选择一个方向') + (data.style === 'multi' ? '（可多选）' : '');
+    card.appendChild(q);
+
+    const multi = data.style === 'multi';
+    const list = document.createElement('div');
+    list.className = 'opt-list';
+    const btns = [];
+    (data.options || []).forEach((o, i) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'opt-item';
+      const box = document.createElement('span');
+      box.className = 'opt-box';
+      box.textContent = String.fromCharCode(65 + i);
+      const label = document.createElement('span');
+      label.className = 'opt-label';
+      label.textContent = String(o);
+      item.append(box, label);
+      item.addEventListener('click', () => {
+        if (!opts.interactive) return;
+        if (multi) {
+          item.classList.toggle('sel');
+        } else {
+          // 单选：点击即确认发送
+          el.input.value = `我选择：「${o}」`;
+          sendMessage();
+        }
+      });
+      btns.push(item);
+      list.appendChild(item);
+    });
+    card.appendChild(list);
+
+    const row = document.createElement('div');
+    row.className = 'opt-actions';
+    if (opts.interactive) {
+      const custom = document.createElement('input');
+      custom.className = 'opt-custom';
+      custom.placeholder = '或输入自定义回答…';
+      const submit = document.createElement('button');
+      submit.type = 'button';
+      submit.className = 'opt-submit';
+      submit.textContent = multi ? '提交多选' : '发送';
+      const doSend = () => {
+        const sel = btns.filter((b) => b.classList.contains('sel')).map((b) => b.querySelector('.opt-label').textContent);
+        const chosen = [...sel, custom.value.trim()].filter(Boolean);
+        if (!chosen.length) { custom.focus(); return; }
+        el.input.value = (multi ? '我选择（多选）：' : '我选择：') + chosen.map((c) => `「${c}」`).join('、');
+        sendMessage();
+      };
+      submit.addEventListener('click', doSend);
+      custom.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSend(); } });
+      if (multi) row.append(submit);
+      row.append(custom);
+      if (!multi) row.append(submit);
+    } else {
+      card.classList.add('disabled');
+      const note = document.createElement('span');
+      note.className = 'opt-note';
+      note.textContent = '（历史回合中的选项卡片，仅供参考）';
+      row.appendChild(note);
+    }
+    card.appendChild(row);
+    return card;
+  }
+
   /* ---------------- 滚动 ---------------- */
 
   el.chatScroll.addEventListener('scroll', () => {
@@ -265,7 +361,7 @@
         if (msg.content) {
           const answer = makeAnswerDiv();
           answer.classList.remove('streaming');
-          renderMarkdownInto(answer, msg.content);
+          renderAnswerContent(answer, msg.content, { interactive: false });
           agentBody.appendChild(answer);
           lastAnswer = answer;
         }
@@ -488,7 +584,7 @@
       closeThink();
       if (answerDiv) {
         answerDiv.classList.remove('streaming');
-        renderMarkdownInto(answerDiv, answerText);
+        renderAnswerContent(answerDiv, answerText, { interactive: true });
         if (answerText.trim()) answerDiv.appendChild(makeActions(() => answerText));
       }
       setStreaming(false);
