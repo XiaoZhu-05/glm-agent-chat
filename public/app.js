@@ -31,6 +31,7 @@
     abortCtrl: null,
     pinned: true,
     planMode: false,
+    model: 'glm-4.5-flash', // 当前模型（自定义下拉维护）
     images: [], // 待发送图片 dataURL 列表
     files: [],  // 待发送文档附件（/api/upload 产物）
   };
@@ -615,8 +616,8 @@
     const mode = modeOverride === 'chat' || modeOverride === 'plan' ? modeOverride : state.planMode ? 'plan' : 'chat';
 
     // 客户端预校验图片（服务端仍会兜底校验）
-    if (images.length && !(state.config.visionModels || []).includes(el.modelSelect.value)) {
-      toast(`当前模型 ${el.modelSelect.value} 不支持图片，请切换到 glm-4v-flash 等视觉模型`, 'error');
+    if (images.length && !(state.config.visionModels || []).includes(state.model)) {
+      toast(`当前模型 ${state.model} 不支持图片，请切换到 glm-4v-flash 等视觉模型`, 'error');
       return;
     }
 
@@ -684,7 +685,7 @@
         body: JSON.stringify({
           message: text,
           conversationId: state.currentConvId,
-          model: el.modelSelect.value || state.config.model,
+          model: state.model || state.config.model,
           mode,
           images,
           attachments: files.map((f) => ({
@@ -918,6 +919,64 @@
     renderAttachBar();
   });
 
+  /* ---------------- 模型下拉（自定义组件，兼容 WebView 无原生弹层） ---------------- */
+
+  function buildModelMenu() {
+    const menu = $('#ms-menu');
+    const valueEl = $('#ms-value');
+    const models = state.config.models || [];
+    const saved = localStorage.getItem('glm-model');
+    state.model = saved && models.includes(saved) ? saved : state.config.model || models[0] || 'glm-4.5-flash';
+    menu.innerHTML = '';
+    for (const m of models) {
+      const item = document.createElement('div');
+      item.className = 'ms-option' + (m === state.model ? ' sel' : '');
+      item.setAttribute('role', 'option');
+      item.dataset.value = m;
+      const name = document.createElement('span');
+      name.textContent = m;
+      item.appendChild(name);
+      if ((state.config.visionModels || []).includes(m)) {
+        const tag = document.createElement('span');
+        tag.className = 'ms-tag';
+        tag.textContent = '🖼 视觉';
+        item.appendChild(tag);
+      }
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setModel(m);
+        closeModelMenu();
+      });
+      menu.appendChild(item);
+    }
+    valueEl.textContent = state.model;
+  }
+
+  function setModel(m) {
+    if (!(state.config.models || []).includes(m)) return;
+    state.model = m;
+    localStorage.setItem('glm-model', m);
+    $('#ms-value').textContent = m;
+    el.modelSelect.querySelectorAll('.ms-option').forEach((o) => o.classList.toggle('sel', o.dataset.value === m));
+  }
+
+  function closeModelMenu() {
+    el.modelSelect.classList.remove('open');
+    el.modelSelect.setAttribute('aria-expanded', 'false');
+  }
+
+  if (el.modelSelect) {
+    el.modelSelect.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = el.modelSelect.classList.toggle('open');
+      el.modelSelect.setAttribute('aria-expanded', String(open));
+    });
+    document.addEventListener('click', () => closeModelMenu());
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeModelMenu();
+    });
+  }
+
   /* ---------------- 输入框 ---------------- */
 
   function autoGrow() {
@@ -954,17 +1013,8 @@
       state.config = { model: 'glm-5.3', models: ['glm-5.3'], hasKey: false, workspace: '', visionModels: ['glm-4v-flash'] };
     }
 
-    // 模型下拉
-    const saved = localStorage.getItem('glm-model');
-    for (const m of state.config.models || []) {
-      const opt = document.createElement('option');
-      opt.value = m;
-      opt.textContent = m;
-      el.modelSelect.appendChild(opt);
-    }
-    el.modelSelect.value =
-      saved && state.config.models.includes(saved) ? saved : state.config.model;
-    el.modelSelect.addEventListener('change', () => localStorage.setItem('glm-model', el.modelSelect.value));
+    // 模型下拉（自定义组件）
+    buildModelMenu();
 
     // Key 状态
     if (state.config.hasKey) {
