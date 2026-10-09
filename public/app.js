@@ -17,6 +17,10 @@
     stopBtn: $('#stop-btn'),
     keyStatus: $('#key-status'),
     workspacePath: $('#workspace-path'),
+    planToggle: $('#plan-toggle'),
+    attachBtn: $('#attach-btn'),
+    attachInput: $('#attach-input'),
+    attachBar: $('#attach-bar'),
   };
 
   const state = {
@@ -26,6 +30,9 @@
     streaming: false,
     abortCtrl: null,
     pinned: true,
+    planMode: false,
+    images: [], // 待发送图片 dataURL 列表
+    files: [],  // 待发送文档附件（/api/upload 产物）
   };
 
   /* ---------------- Markdown ---------------- */
@@ -92,6 +99,183 @@
   const copyIconSvg =
     '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
 
+  /* ---------------- 特殊内容块（options / plan） ---------------- */
+
+  /** 从回答文本中提取 ```options / ```plan 代码块，返回剩余文本与块列表 */
+  function extractSpecialBlocks(text) {
+    const blocks = [];
+    const re = /```(options|plan)\s*\n([\s\S]*?)```/g;
+    const clean = String(text || '').replace(re, (m, kind, body) => {
+      try {
+        blocks.push({ kind, data: JSON.parse(body.trim()) });
+        return '';
+      } catch { return m; }
+    });
+    return { clean, blocks };
+  }
+
+  /** 渲染回答：Markdown + 特殊卡片（澄清选项等） */
+  function renderAnswerContent(container, rawText, opts = {}) {
+    const { clean, blocks } = extractSpecialBlocks(rawText);
+    renderMarkdownInto(container, clean);
+    for (const b of blocks) {
+      if (b.kind === 'options') container.appendChild(makeOptionsCard(b.data, opts));
+      if (b.kind === 'plan') container.appendChild(makePlanCard(b.data, opts));
+    }
+  }
+
+  /** 计划卡片：确认前阻塞执行；确认后以执行模式重发，放弃则标记 */
+  function makePlanCard(data, opts = {}) {
+    const card = document.createElement('div');
+    card.className = 'plan-card';
+    const head = document.createElement('div');
+    head.className = 'plan-head';
+    head.innerHTML = `<span class="plan-icon">🧭</span><span class="plan-title"></span><span class="plan-state"></span>`;
+    head.querySelector('.plan-title').textContent = data.title || '执行计划';
+    card.appendChild(head);
+
+    if (data.goal) {
+      const goal = document.createElement('div');
+      goal.className = 'plan-goal';
+      goal.textContent = '目标：' + data.goal;
+      card.appendChild(goal);
+    }
+
+    const steps = document.createElement('ol');
+    steps.className = 'plan-steps';
+    (data.steps || []).forEach((s) => {
+      const li = document.createElement('li');
+      const a = document.createElement('div');
+      a.className = 'ps-action';
+      a.textContent = s.action || '';
+      if (s.detail) {
+        const d = document.createElement('div');
+        d.className = 'ps-detail';
+        d.textContent = s.detail;
+        a.appendChild(d);
+      }
+      li.appendChild(a);
+      steps.appendChild(li);
+    });
+    card.appendChild(steps);
+
+    if (Array.isArray(data.risks) && data.risks.length) {
+      const risks = document.createElement('div');
+      risks.className = 'plan-risks';
+      risks.innerHTML = '<b>⚠ 风险与注意</b>';
+      const ul = document.createElement('ul');
+      data.risks.forEach((r) => {
+        const li = document.createElement('li');
+        li.textContent = r;
+        ul.appendChild(li);
+      });
+      risks.appendChild(ul);
+      card.appendChild(risks);
+    }
+
+    const stateEl = head.querySelector('.plan-state');
+    const setState = (t, cls) => { stateEl.textContent = t; stateEl.className = 'plan-state ' + (cls || ''); };
+
+    if (opts.interactive) {
+      const row = document.createElement('div');
+      row.className = 'plan-actions';
+      const ok = document.createElement('button');
+      ok.type = 'button';
+      ok.className = 'plan-ok';
+      ok.textContent = '✓ 按此计划执行';
+      ok.addEventListener('click', () => {
+        setState('已确认', 'ok');
+        row.remove();
+        if (el.planToggle) { state.planMode = false; el.planToggle.classList.remove('on'); }
+        el.input.value = `请按以下已确认的计划执行（无需再次确认）：\n${JSON.stringify(data, null, 2)}`;
+        sendMessage('chat');
+      });
+      const no = document.createElement('button');
+      no.type = 'button';
+      no.className = 'plan-no';
+      no.textContent = '✕ 放弃计划';
+      no.addEventListener('click', () => {
+        setState('已放弃', 'no');
+        row.remove();
+      });
+      row.append(ok, no);
+      card.appendChild(row);
+    }
+    return card;
+  }
+
+  /** 澄清选项卡片：单选（点击即发送）/ 多选（勾选后提交）/ 自定义输入 */
+  function makeOptionsCard(data, opts = {}) {
+    const card = document.createElement('div');
+    card.className = 'options-card';
+    const q = document.createElement('div');
+    q.className = 'opt-q';
+    q.textContent = (data.question || '请选择一个方向') + (data.style === 'multi' ? '（可多选）' : '');
+    card.appendChild(q);
+
+    const multi = data.style === 'multi';
+    const list = document.createElement('div');
+    list.className = 'opt-list';
+    const btns = [];
+    (data.options || []).forEach((o, i) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'opt-item';
+      const box = document.createElement('span');
+      box.className = 'opt-box';
+      box.textContent = String.fromCharCode(65 + i);
+      const label = document.createElement('span');
+      label.className = 'opt-label';
+      label.textContent = String(o);
+      item.append(box, label);
+      item.addEventListener('click', () => {
+        if (!opts.interactive) return;
+        if (multi) {
+          item.classList.toggle('sel');
+        } else {
+          // 单选：点击即确认发送
+          el.input.value = `我选择：「${o}」`;
+          sendMessage();
+        }
+      });
+      btns.push(item);
+      list.appendChild(item);
+    });
+    card.appendChild(list);
+
+    const row = document.createElement('div');
+    row.className = 'opt-actions';
+    if (opts.interactive) {
+      const custom = document.createElement('input');
+      custom.className = 'opt-custom';
+      custom.placeholder = '或输入自定义回答…';
+      const submit = document.createElement('button');
+      submit.type = 'button';
+      submit.className = 'opt-submit';
+      submit.textContent = multi ? '提交多选' : '发送';
+      const doSend = () => {
+        const sel = btns.filter((b) => b.classList.contains('sel')).map((b) => b.querySelector('.opt-label').textContent);
+        const chosen = [...sel, custom.value.trim()].filter(Boolean);
+        if (!chosen.length) { custom.focus(); return; }
+        el.input.value = (multi ? '我选择（多选）：' : '我选择：') + chosen.map((c) => `「${c}」`).join('、');
+        sendMessage();
+      };
+      submit.addEventListener('click', doSend);
+      custom.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSend(); } });
+      if (multi) row.append(submit);
+      row.append(custom);
+      if (!multi) row.append(submit);
+    } else {
+      card.classList.add('disabled');
+      const note = document.createElement('span');
+      note.className = 'opt-note';
+      note.textContent = '（历史回合中的选项卡片，仅供参考）';
+      row.appendChild(note);
+    }
+    card.appendChild(row);
+    return card;
+  }
+
   /* ---------------- 滚动 ---------------- */
 
   el.chatScroll.addEventListener('scroll', () => {
@@ -110,11 +294,13 @@
     read_file: { label: '读取文件' },
     write_file: { label: '写入文件' },
     list_dir: { label: '列出目录' },
+    web_search: { label: '联网搜索' },
   };
 
   function toolCmdText(name, args) {
     args = args || {};
     if (name === 'run_command') return '$ ' + (args.command || '');
+    if (name === 'web_search') return '🔍 ' + (args.query || '');
     if (name === 'write_file') return `${args.path || ''}（${String(args.content ?? '').length} 字符）`;
     return args.path || '.';
   }
@@ -166,14 +352,29 @@
     return card;
   }
 
-  function fillToolResult(card, ok, output) {
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function fillToolResult(card, callName, ok, output) {
     card.classList.remove('running');
     const spin = card.querySelector('.tool-spinner');
     if (spin) spin.remove();
     const status = card.querySelector('.tool-status');
     status.textContent = ok ? '✓ 完成' : '✗ 出错';
     if (!ok) card.querySelector('.tool-badge').classList.add('err');
-    card.querySelector('.tool-output').textContent = output || '(无输出)';
+    const pre = card.querySelector('.tool-output');
+    if (callName === 'web_search' && ok && output) {
+      // 搜索结果渲染为可点击的溯源链接
+      const div = document.createElement('div');
+      div.className = 'tool-output html';
+      div.innerHTML = escapeHtml(output)
+        .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+        .replace(/\n/g, '<br>');
+      pre.replaceWith(div);
+    } else {
+      pre.textContent = output || '(无输出)';
+    }
     if ((output || '').length <= 400) card.classList.add('open');
   }
 
@@ -193,12 +394,36 @@
     return { wrap, body };
   }
 
-  function makeUserBubble(text) {
+  function makeUserBubble(text, images = [], files = []) {
     const wrap = document.createElement('div');
     wrap.className = 'msg-user';
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = text;
+    if (files.length) {
+      const list = document.createElement('div');
+      list.className = 'bubble-files';
+      for (const f of files) {
+        const chip = document.createElement('div');
+        chip.className = 'file-chip small' + (f.extraction?.ok === false ? ' err' : '');
+        chip.textContent = `📄 ${f.name}${f.extraction?.summary ? ' · ' + f.extraction.summary : ''}`;
+        if (f.extraction?.warning) chip.title = f.extraction.warning;
+        list.appendChild(chip);
+      }
+      bubble.appendChild(list);
+    }
+    if (images.length) {
+      const grid = document.createElement('div');
+      grid.className = 'bubble-images';
+      for (const src of images) {
+        const img = document.createElement('img');
+        img.src = src;
+        img.loading = 'lazy';
+        img.addEventListener('click', () => window.open(src, '_blank'));
+        grid.appendChild(img);
+      }
+      bubble.appendChild(grid);
+    }
     const avatar = document.createElement('div');
     avatar.className = 'avatar-user';
     avatar.textContent = '我';
@@ -239,7 +464,7 @@
 
     for (const msg of conv.messages) {
       if (msg.role === 'user') {
-        el.chat.appendChild(makeUserBubble(msg.content));
+        el.chat.appendChild(makeUserBubble(msg.content, msg.images || [], msg.attachments || []));
         agentBody = null;
       } else if (msg.role === 'assistant') {
         if (!agentBody) {
@@ -258,14 +483,14 @@
         for (const call of msg.tool_calls || []) {
           const card = makeToolCard(call);
           const toolMsg = (conv.messages || []).find((t) => t.role === 'tool' && t.tool_call_id === call.id);
-          if (toolMsg) fillToolResult(card, toolMsg.ok !== false, toolMsg.content);
-          else fillToolResult(card, true, '(运行中)');
+          if (toolMsg) fillToolResult(card, call.name, toolMsg.ok !== false, toolMsg.content);
+          else fillToolResult(card, call.name, true, '(运行中)');
           agentBody.appendChild(card);
         }
         if (msg.content) {
           const answer = makeAnswerDiv();
           answer.classList.remove('streaming');
-          renderMarkdownInto(answer, msg.content);
+          renderAnswerContent(answer, msg.content, { interactive: false });
           agentBody.appendChild(answer);
           lastAnswer = answer;
         }
@@ -381,14 +606,27 @@
     setStreaming(false);
   }
 
-  async function sendMessage() {
+  async function sendMessage(modeOverride) {
     const text = el.input.value.trim();
-    if (!text || state.streaming) return;
+    const images = state.images.slice();
+    const files = state.files.slice();
+    if (!text && !images.length && !files.length) return;
+    if (state.streaming) return;
+    const mode = modeOverride === 'chat' || modeOverride === 'plan' ? modeOverride : state.planMode ? 'plan' : 'chat';
+
+    // 客户端预校验图片（服务端仍会兜底校验）
+    if (images.length && !(state.config.visionModels || []).includes(el.modelSelect.value)) {
+      toast(`当前模型 ${el.modelSelect.value} 不支持图片，请切换到 glm-4v-flash 等视觉模型`, 'error');
+      return;
+    }
 
     // 清掉空状态 / 追加用户气泡
     if (!el.chat.querySelector('.msg-user, .msg-agent')) el.chat.innerHTML = '';
-    el.chat.appendChild(makeUserBubble(text));
+    el.chat.appendChild(makeUserBubble(text, images, files));
     el.input.value = '';
+    state.images = [];
+    state.files = [];
+    renderAttachBar();
     autoGrow();
     scrollBottom(true);
 
@@ -447,6 +685,14 @@
           message: text,
           conversationId: state.currentConvId,
           model: el.modelSelect.value || state.config.model,
+          mode,
+          images,
+          attachments: files.map((f) => ({
+            name: f.name,
+            path: f.path,
+            summary: f.extraction?.summary || '',
+            text: f.extraction?.text || '',
+          })),
         }),
         signal: state.abortCtrl.signal,
       });
@@ -488,7 +734,7 @@
       closeThink();
       if (answerDiv) {
         answerDiv.classList.remove('streaming');
-        renderMarkdownInto(answerDiv, answerText);
+        renderAnswerContent(answerDiv, answerText, { interactive: true });
         if (answerText.trim()) answerDiv.appendChild(makeActions(() => answerText));
       }
       setStreaming(false);
@@ -523,7 +769,7 @@
         case 'tool_result': {
           const cards = turn.body.querySelectorAll('.tool-card.running');
           const card = cards[cards.length - 1];
-          if (card) fillToolResult(card, evt.ok, evt.output);
+          if (card) fillToolResult(card, evt.name, evt.ok, evt.output);
           scrollBottom();
           break;
         }
@@ -542,6 +788,136 @@
     }
   }
 
+  /* ---------------- 附件上传（图片 / 文档） ---------------- */
+
+  const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+  const IMAGE_MAX_MB = 5;
+  const DOC_EXTS = ['.pdf', '.xlsx', '.xls', '.csv', '.txt', '.md', '.json', '.fasta', '.fa', '.fas'];
+
+  function toast(msg, kind = 'info') {
+    let host = document.querySelector('#toast-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'toast-host';
+      document.body.appendChild(host);
+    }
+    const t = document.createElement('div');
+    t.className = 'toast ' + kind;
+    t.textContent = msg;
+    host.appendChild(t);
+    setTimeout(() => { t.classList.add('fade'); setTimeout(() => t.remove(), 300); }, 3500);
+  }
+
+  function renderAttachBar() {
+    const bar = el.attachBar;
+    bar.innerHTML = '';
+    const items = [
+      ...state.images.map((src, i) => ({ kind: 'image', src, i })),
+      ...state.files.map((f, i) => ({ kind: 'file', f, i })),
+    ];
+    bar.hidden = items.length === 0;
+    for (const it of items) {
+      if (it.kind === 'image') {
+        const chip = document.createElement('div');
+        chip.className = 'img-chip';
+        const img = document.createElement('img');
+        img.src = it.src;
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'img-del';
+        del.textContent = '×';
+        del.title = '移除图片';
+        del.addEventListener('click', () => { state.images.splice(it.i, 1); renderAttachBar(); });
+        chip.append(img, del);
+        bar.appendChild(chip);
+      } else {
+        const f = it.f;
+        const chip = document.createElement('div');
+        chip.className = 'file-chip' + (f.extraction?.ok === false ? ' err' : '');
+        const icon = document.createElement('span');
+        icon.className = 'fc-icon';
+        icon.textContent = '📄';
+        const info = document.createElement('div');
+        info.className = 'fc-info';
+        const nm = document.createElement('div');
+        nm.className = 'fc-name';
+        nm.textContent = f.name;
+        const sm = document.createElement('div');
+        sm.className = 'fc-summary';
+        sm.textContent = f.extraction?.ok === false
+          ? (f.extraction.error || '解析失败')
+          : `${f.extraction?.summary || ''}${f.extraction?.warning ? ' ⚠' : ''}`;
+        info.append(nm, sm);
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'img-del';
+        del.textContent = '×';
+        del.title = '移除附件';
+        del.addEventListener('click', () => { state.files.splice(it.i, 1); renderAttachBar(); });
+        chip.append(icon, info, del);
+        if (f.extraction?.warning) chip.title = f.extraction.warning;
+        bar.appendChild(chip);
+      }
+    }
+  }
+
+  function readAsDataURL(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(new Error('读取文件失败'));
+      r.readAsDataURL(file);
+    });
+  }
+
+  async function uploadDocument(file) {
+    const data = await readAsDataURL(file);
+    const res = await fetch('/api/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: file.name, mimeType: file.type, data }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(out.error || `上传失败（HTTP ${res.status}）`);
+    return out; // {name, path, size, extraction}
+  }
+
+  el.attachBtn?.addEventListener('click', () => el.attachInput.click());
+  el.attachInput?.addEventListener('change', async () => {
+    const files = [...(el.attachInput.files || [])];
+    el.attachInput.value = '';
+    for (const f of files) {
+      const isImage = IMAGE_TYPES.includes(f.type);
+      const ext = '.' + (f.name.split('.').pop() || '').toLowerCase();
+      if (!isImage && !DOC_EXTS.includes(ext)) {
+        toast(`「${f.name}」类型不支持（图片：PNG/JPG/WEBP；文档：${DOC_EXTS.join('/')}）`, 'error');
+        continue;
+      }
+      if (isImage) {
+        if (f.size > IMAGE_MAX_MB * 1024 * 1024) {
+          toast(`「${f.name}」过大（${(f.size / 1048576).toFixed(1)}MB），单张上限 ${IMAGE_MAX_MB}MB`, 'error');
+          continue;
+        }
+        if (state.images.length >= 4) { toast('单条消息最多 4 张图片', 'error'); break; }
+        try {
+          state.images.push(await readAsDataURL(f));
+        } catch (e) { toast(`「${f.name}」${e.message}`, 'error'); }
+      } else {
+        if (state.files.length >= 4) { toast('单条消息最多 4 个文档', 'error'); break; }
+        if (f.size > 10 * 1024 * 1024) { toast(`「${f.name}」过大（上限 10MB）`, 'error'); continue; }
+        try {
+          const out = await uploadDocument(f);
+          state.files.push(out);
+          if (out.extraction?.ok === false) toast(`「${f.name}」${out.extraction.error}`, 'error');
+          else if (out.extraction?.warning) toast(`「${f.name}」${out.extraction.warning}`, 'info');
+        } catch (e) {
+          toast(`「${f.name}」${e.message}`, 'error');
+        }
+      }
+    }
+    renderAttachBar();
+  });
+
   /* ---------------- 输入框 ---------------- */
 
   function autoGrow() {
@@ -557,17 +933,25 @@
     }
   });
 
-  el.sendBtn.addEventListener('click', sendMessage);
+  el.sendBtn.addEventListener('click', () => sendMessage());
   el.stopBtn.addEventListener('click', stopStreaming);
   el.newChatBtn.addEventListener('click', newChat);
+  el.planToggle?.addEventListener('click', () => {
+    state.planMode = !state.planMode;
+    el.planToggle.classList.toggle('on', state.planMode);
+    el.input.placeholder = state.planMode
+      ? '规划模式：描述任务，Agent 会先给出计划等你确认'
+      : '给 GLM Agent 发送消息，例如：看看工作区里有什么文件';
+  });
 
   /* ---------------- 初始化 ---------------- */
 
   async function init() {
     try {
       state.config = await (await fetch('/api/config')).json();
+      state.config.visionModels = state.config.visionModels || ['glm-4v-flash'];
     } catch {
-      state.config = { model: 'glm-5.3', models: ['glm-5.3'], hasKey: false, workspace: '' };
+      state.config = { model: 'glm-5.3', models: ['glm-5.3'], hasKey: false, workspace: '', visionModels: ['glm-4v-flash'] };
     }
 
     // 模型下拉

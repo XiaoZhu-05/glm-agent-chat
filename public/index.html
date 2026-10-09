@@ -51,9 +51,18 @@
       <div id="input-area">
         <div class="input-wrap">
           <div class="input-box" id="input-box">
+            <div id="attach-bar" class="attach-bar" hidden></div>
             <textarea id="input" rows="1" placeholder="给 GLM Agent 发送消息，例如：看看工作区里有什么文件"></textarea>
             <div class="input-actions">
               <div class="input-tools">
+                <button id="attach-btn" class="tool-icon-btn" type="button" title="上传图片（PNG/JPG/WEBP，≤5MB）或文档（PDF/XLSX/CSV/TXT/FASTA，≤10MB）">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                </button>
+                <input type="file" id="attach-input" hidden multiple accept="image/png,image/jpeg,image/webp,.pdf,.xlsx,.xls,.csv,.txt,.md,.json,.fasta,.fa,.fas" />
+                <button id="plan-toggle" class="pill-toggle" type="button" title="规划模式：先给出计划，经你确认后再执行">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+                  规划模式
+                </button>
                 <span id="key-status" class="key-status"></span>
               </div>
               <div class="input-buttons">

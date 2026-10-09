@@ -1,0 +1,200 @@
+{
+  "base": "http://localhost:3210",
+  "at": "2026-10-09T03:58:05.814Z",
+  "models": {
+    "text": "glm-4.5-flash",
+    "vision": "glm-4v-flash"
+  },
+  "summary": {
+    "passed": 22,
+    "total": 22
+  },
+  "results": [
+    {
+      "id": "T1a",
+      "name": "规划模式不调用工具",
+      "expected": "0 次 tool_call",
+      "actual": "0 次",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "T1b",
+      "name": "输出结构化计划(\\`\\`\\`plan JSON)",
+      "expected": "JSON 含 title/steps≥2",
+      "actual": "steps=3",
+      "pass": true,
+      "evidence": "{\"title\":\"创建个人主页\",\"goal\":\"在工作区创建一个包含标题和自我介绍的简单个人主页 index.html\",\"steps\":[{\"action\":\"创建 index.html 文件\",\"detail\":\"在工作区目录下创建 index.html 文件，包含基本的 HTML5 文档结构\"},{\"action\":\"添加页面标题\",\"detail\":\"在 <head> 部分添加页面标题"
+    },
+    {
+      "id": "T1c",
+      "name": "确认后执行产生工具调用",
+      "expected": "≥1 次 tool_call",
+      "actual": "1 次",
+      "pass": true,
+      "evidence": "write_file"
+    },
+    {
+      "id": "T2-png",
+      "name": "png 格式识别",
+      "expected": "回答含「PNG-TEST-2026」",
+      "actual": "PNG-TEST-2026",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "T2-jpg",
+      "name": "jpg 格式识别",
+      "expected": "回答含「JPG-TEST-2026」",
+      "actual": "JPG-TEST-2026",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "T2-webp",
+      "name": "webp 格式识别",
+      "expected": "回答含「WEBP-TEST-2026」",
+      "actual": "WEBP-TEST-2026",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "T2-err-model",
+      "name": "非视觉模型+图片 → 友好报错",
+      "expected": "HTTP 400 且提示切换模型",
+      "actual": "400: 当前模型 glm-4.5-flash 不支持图片输入。请在右上角模型下拉中切换到视觉模型（如 glm-4v-flash，免费）后重试。",
+      "pass": true,
+      "evidence": "当前模型 glm-4.5-flash 不支持图片输入。请在右上角模型下拉中切换到视觉模型（如 glm-4v-flash，免费）后重试。"
+    },
+    {
+      "id": "T2-err-fmt",
+      "name": "GIF 格式 → 友好报错",
+      "expected": "HTTP 400 且说明仅支持 PNG/JPG/WEBP",
+      "actual": "400: 图片格式仅支持 PNG / JPG / WEBP，请转换格式后重试。",
+      "pass": true,
+      "evidence": "图片格式仅支持 PNG / JPG / WEBP，请转换格式后重试。"
+    },
+    {
+      "id": "T2-err-size",
+      "name": "超大图（>5MB）→ 友好报错",
+      "expected": "HTTP 400 且提示大小上限",
+      "actual": "400: 图片过大（约 5.3MB），单张上限 5MB，请压缩后重试。",
+      "pass": true,
+      "evidence": "图片过大（约 5.3MB），单张上限 5MB，请压缩后重试。"
+    },
+    {
+      "id": "T3-pdf-text",
+      "name": "PDF 文本提取",
+      "expected": "ok, 3 页, 文本含 Hello GLM Agent Chat",
+      "actual": "true 3页 --- 第 1 页 ---\nHello GLM Agent Chat.\n\n--- 第 2 页 ---\nFunctiona",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "T3-pdf-scan",
+      "name": "扫描件识别为无文本层（不做 OCR，明确提示）",
+      "expected": "hasText=false + warning 含「扫描件」",
+      "actual": "hasText=false 未能提取到文本层：该 PDF 很可能是扫描件/纯图片。本项目未内置 OCR，无法读取其中的文字内容；如需处理请先在本地做 OCR 或提供文本版。",
+      "pass": true,
+      "evidence": "未能提取到文本层：该 PDF 很可能是扫描件/纯图片。本项目未内置 OCR，无法读取其中的文字内容；如需处理请先在本地做 OCR 或提供文本版。"
+    },
+    {
+      "id": "T3-xlsx",
+      "name": "Excel 多 sheet/公式值/合并单元格",
+      "expected": "2 个 sheet，含数据与合并单元格文本",
+      "actual": "Excel · 2 个 Sheet「销售」「库存」 | ### Sheet「销售」（7 行 × 4 列）\n\n| 月份 | 销量 | 单价 | 金额(公式=C*D) |\n| --- | --- | --- | --- |\n| 1月 | 120 | 29.9 ",
+      "pass": true,
+      "evidence": "公式显示为计算值；合并单元格仅左上角有值"
+    },
+    {
+      "id": "T3-fasta",
+      "name": "FASTA 解析（3 条序列、> 注释、长度/GC）",
+      "expected": "count=3, 含 seq1..seq3 与长度",
+      "actual": "FASTA · 3 条序列 | 序列统计（ID | 长度 | GC 含量）：\n| ID | 长度 | GC |\n| --- | --- | --- |\n| seq1 | 43 | 9.3% |\n| seq2 | 41 | 9.8% |\n| seq3 | 37 | 78.4",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "T3-err-ext",
+      "name": "不允许的类型 → 友好报错",
+      "expected": "HTTP 400 且列出支持类型",
+      "actual": "400: 不支持的文件类型「.exe」。支持：.pdf / .xlsx / .xls / .csv / .txt / .md / .json / .fasta / .fa",
+      "pass": true,
+      "evidence": "不支持的文件类型「.exe」。支持：.pdf / .xlsx / .xls / .csv / .txt / .md / .json / .fasta / .fa / .fas"
+    },
+    {
+      "id": "T3-attach",
+      "name": "附件内容注入对话（模型可引用）",
+      "expected": "回答含「Hello GLM Agent Chat」",
+      "actual": "根据附件内容，第一页的第一句英文是：\n\n**Hello GLM Agent Chat.**",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "T4-ctx",
+      "name": "6 轮上下文保持 + 指代消解（\"上面那个/最开始\"）",
+      "expected": "每轮均命中期望关键词",
+      "actual": "第1轮✓，第2轮✓，第3轮✓，第4轮✓，第5轮✓，第6轮✓",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "T5-real-call",
+      "name": "真实发起 web_search 工具调用",
+      "expected": "出现 tool_call(web_search)",
+      "actual": "web_search,web_search",
+      "pass": true,
+      "evidence": "{\"query\":\"DeepSeek Harness GitHub 仓库地址\"}"
+    },
+    {
+      "id": "T5-links",
+      "name": "返回可溯源链接",
+      "expected": "结果含 ≥1 个 URL",
+      "actual": "6 个 URL: https://www.deepseek.com/",
+      "pass": true,
+      "evidence": "搜索「DeepSeek Harness GitHub 仓库地址」（引擎：Bing，时间：2026-10-09T03:56:49.992Z）的结果：\n1. [DeepSeek | Into the Unknown](https://www.deepseek.com/)\n   1 天前&ensp;·&ensp;DeepSeek is an AI research company focused on building world-leading general artificial intelligence. We d"
+    },
+    {
+      "id": "T5-cite",
+      "name": "回答引用来源链接",
+      "expected": "回答含 github.com 或 http 链接",
+      "actual": "\n我来帮您搜索 DeepSeek Harness 的 GitHub 开源仓库地址。\n\n\n根据搜索结果，DeepSeek Harness 的 GitHub 开源仓库地址是：\n\n**[https://github.com/deepseek-ai/deepseek-harness](https://git",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "T6-ask",
+      "name": "模糊需求 → 输出选项卡片而非瞎猜",
+      "expected": "```options JSON 块，≥2 个互斥选项",
+      "actual": "options=4: [\"Excel/CSV 表格数据（清洗、统计、转换）\",\"文本数据（提取、总结、分析）\",\"代码/脚本数据（重构、调试、优化）\",\"其他类型数据（请具体说明）\"]",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "T6-noexec",
+      "name": "提问消息不与工具执行混杂（先问后做）",
+      "expected": "最终提问消息 0 个 tool_calls",
+      "actual": "0 个（前置探索 0 次）",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "T6-follow",
+      "name": "选择后正常继续执行",
+      "expected": "收到明确回答/开始执行",
+      "actual": "\n好的，我来帮您处理Excel/CSV表格数据。首先让我查看一下工作区中的文件情况。\n\n\n我看到工作区中有多个Excel文件。让我先读取其中一个Excel文件来 (+8 次工具)",
+      "pass": true,
+      "evidence": ""
+    }
+  ],
+  "webEvidence": {
+    "engineLine": "搜索「DeepSeek Harness GitHub 仓库地址」（引擎：Bing，时间：2026-10-09T03:56:49.992Z）的结果：",
+    "sampleUrls": [
+      "https://www.deepseek.com/",
+      "https://baike.baidu.com/item/%E6%9D%AD%E5%B7%9E%E6%B7%B1%E5%BA%A6%E6%B1%82%E7%B4%A2%E4%BA%BA%E5%B7%A5%E6%99%BA%E8%83%BD%E5%9F%BA%E7%A1%80%E6%8A%80%E6%9C%AF%E7%A0%94%E7%A9%B6%E6%9C%89%E9%99%90%E5%85%AC%E5%8F%B8/64541110",
+      "https://download.deepseek.com/",
+      "https://github.com/deepseek-ai",
+      "https://apps.apple.com/us/app/deepseek-ai-assistant/id6737597349"
+    ]
+  }
+}
