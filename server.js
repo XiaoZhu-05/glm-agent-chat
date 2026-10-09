@@ -51,6 +51,9 @@ const CONFIG = {
   maxAttachmentChars: parseInt(process.env.MAX_ATTACHMENT_CHARS || '8000', 10),
   pythonBin: process.env.PYTHON_BIN || 'python',
   contextWindowMessages: parseInt(process.env.CONTEXT_WINDOW_MESSAGES || '40', 10),
+  maxTokens: parseInt(process.env.GLM_MAX_TOKENS || '8192', 10),
+  // 各模型 max_tokens 上限不同（如 glm-4v-flash 上限 1024），未列出的用全局默认
+  maxTokensByModel: { 'glm-4v-flash': 1024 },
   maxSteps: parseInt(process.env.AGENT_MAX_STEPS || '8', 10),
   cmdTimeoutMs: parseInt(process.env.CMD_TIMEOUT_MS || '30000', 10),
   maxToolOutput: parseInt(process.env.MAX_TOOL_OUTPUT || '6000', 10),
@@ -467,7 +470,7 @@ async function streamCompletion(messages, tools, model, onEvent) {
     messages,
     stream: true,
     thinking: { type: 'enabled' },
-    max_tokens: 8192,
+    max_tokens: CONFIG.maxTokensByModel[model] ?? CONFIG.maxTokens,
   };
   if (tools && tools.length) body.tools = tools;
 
