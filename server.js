@@ -41,7 +41,10 @@ const CONFIG = {
   apiKey: process.env.GLM_API_KEY || '',
   baseUrl: (process.env.GLM_BASE_URL || 'https://open.bigmodel.cn/api/paas/v4').replace(/\/+$/, ''),
   model: process.env.GLM_MODEL || 'glm-5.3',
-  models: (process.env.GLM_MODELS || 'glm-5.3,glm-4.6,glm-4.5-air,glm-4.5-flash,glm-4-flash').split(',').map(s => s.trim()).filter(Boolean),
+  models: (process.env.GLM_MODELS || 'glm-5.3,glm-4.6,glm-4.5-air,glm-4.5-flash,glm-4-flash,glm-4v-flash').split(',').map(s => s.trim()).filter(Boolean),
+  visionModels: (process.env.GLM_VISION_MODELS || 'glm-4v-flash,glm-4.5v,glm-4.6v').split(',').map(s => s.trim()).filter(Boolean),
+  imageMaxBytes: parseInt(process.env.IMAGE_MAX_BYTES || String(5 * 1024 * 1024), 10),
+  maxImagesPerMessage: parseInt(process.env.MAX_IMAGES_PER_MESSAGE || '4', 10),
   maxSteps: parseInt(process.env.AGENT_MAX_STEPS || '8', 10),
   cmdTimeoutMs: parseInt(process.env.CMD_TIMEOUT_MS || '30000', 10),
   maxToolOutput: parseInt(process.env.MAX_TOOL_OUTPUT || '6000', 10),
@@ -321,12 +324,29 @@ async function streamCompletion(messages, tools, model, onEvent) {
 
 /* ---------------------------- Agent 循环（harness 核心） ---------------------------- */
 
-/** 把存储中的会话消息转成 API 消息（去掉 reasoning，保留 tool_calls/tool 轮次） */
-function toApiMessages(convMessages) {
+/** 把存储中的会话消息转成 API 消息（去掉 reasoning，保留 tool_calls/tool 轮次；历史图片限流） */
+function toApiMessages(convMessages, visionModel) {
   const out = [{ role: 'system', content: SYSTEM_PROMPT }];
-  for (const m of convMessages) {
-    if (m.role === 'user') out.push({ role: 'user', content: m.content });
-    else if (m.role === 'assistant') {
+  // 仅保留最近 3 条带图消息的图片，更早的用占位文本，避免上下文膨胀
+  const imgIdx = [];
+  convMessages.forEach((m, i) => { if (m.role === 'user' && m.images?.length) imgIdx.push(i); });
+  const keepImg = new Set(imgIdx.slice(-3));
+  convMessages.forEach((m, i) => {
+    if (m.role === 'user') {
+      let text = m.content;
+      if (m.images?.length && !keepImg.has(i)) text = (text || '') + '\n[注：用户曾发送过图片，因对话过长已省略]';
+      if (m.images?.length && keepImg.has(i) && visionModel) {
+        out.push({
+          role: 'user',
+          content: [
+            ...m.images.map((url) => ({ type: 'image_url', image_url: { url } })),
+            { type: 'text', text: text || '（请看图）' },
+          ],
+        });
+      } else {
+        out.push({ role: 'user', content: text });
+      }
+    } else if (m.role === 'assistant') {
       const msg = { role: 'assistant', content: m.content || '' };
       if (m.tool_calls?.length) {
         msg.content = m.content || '';
@@ -340,8 +360,29 @@ function toApiMessages(convMessages) {
     } else if (m.role === 'tool' && m.tool_call_id) {
       out.push({ role: 'tool', tool_call_id: m.tool_call_id, content: m.content });
     }
-  }
+  });
   return out;
+}
+
+/** 校验图片消息：格式 / 大小 / 模型能力，返回错误对象或 null */
+function validateImages(images, model) {
+  if (!Array.isArray(images) || !images.length) return null;
+  if (images.length > CONFIG.maxImagesPerMessage) {
+    return { code: 400, error: `图片数量超过上限（${CONFIG.maxImagesPerMessage} 张），请分批发送。` };
+  }
+  if (!CONFIG.visionModels.includes(model)) {
+    return { code: 400, error: `当前模型 ${model} 不支持图片输入。请在右上角模型下拉中切换到视觉模型（如 glm-4v-flash，免费）后重试。` };
+  }
+  for (const img of images) {
+    const s = String(img || '');
+    const m = s.match(/^data:image\/(png|jpe?g|webp);base64,/);
+    if (!m) return { code: 400, error: '图片格式仅支持 PNG / JPG / WEBP，请转换格式后重试。' };
+    const bytes = Math.floor(((s.length - s.indexOf(',') - 1) * 3) / 4);
+    if (bytes > CONFIG.imageMaxBytes) {
+      return { code: 400, error: `图片过大（约 ${(bytes / 1048576).toFixed(1)}MB），单张上限 ${Math.round(CONFIG.imageMaxBytes / 1048576)}MB，请压缩后重试。` };
+    }
+  }
+  return null;
 }
 
 /**
@@ -351,13 +392,13 @@ function toApiMessages(convMessages) {
  */
 async function runAgent(conv, userText, model, onEvent, isAborted, opts = {}) {
   const planMode = opts.mode === 'plan';
-  const userMsg = { id: crypto.randomUUID(), role: 'user', content: userText, ts: Date.now() };
+  const userMsg = { id: crypto.randomUUID(), role: 'user', content: userText, images: opts.images || [], ts: Date.now() };
   conv.messages.push(userMsg);
   if (conv.messages.filter((m) => m.role === 'user').length === 1) {
     conv.title = userText.replace(/\s+/g, ' ').slice(0, 24) || '新对话';
   }
 
-  const apiMessages = toApiMessages(conv.messages);
+  const apiMessages = toApiMessages(conv.messages, CONFIG.visionModels.includes(model));
   if (planMode) apiMessages[0].content += PLAN_PROMPT_SUFFIX;
   const activeTools = planMode ? [] : TOOLS;
 
@@ -482,6 +523,7 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, {
       model: CONFIG.model,
       models: CONFIG.models,
+      visionModels: CONFIG.visionModels,
       hasKey: Boolean(CONFIG.apiKey),
       baseUrl: CONFIG.baseUrl,
       workspace: WORKSPACE_DIR,
@@ -520,13 +562,17 @@ const server = http.createServer(async (req, res) => {
     }
     const body = await readBody(req);
     const userText = String(body.message || '').trim();
-    if (!userText) return sendJson(res, 400, { error: '消息不能为空' });
+    if (!userText && !body.images?.length) return sendJson(res, 400, { error: '消息不能为空' });
 
     let conv = body.conversationId ? store.data[body.conversationId] : null;
     if (!conv) conv = newConversation();
     conv.updatedAt = Date.now();
     const model = CONFIG.models.includes(body.model) || body.model ? String(body.model || CONFIG.model) : CONFIG.model;
     const mode = body.mode === 'plan' ? 'plan' : 'chat';
+
+    // 图片校验（格式 / 大小 / 数量 / 模型能力），错误信息面向用户可直接展示
+    const imgErr = validateImages(body.images, model);
+    if (imgErr) return sendJson(res, imgErr.code, { error: imgErr.error });
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -542,7 +588,7 @@ const server = http.createServer(async (req, res) => {
     req.on('close', () => { clientGone = true; });
 
     try {
-      await runAgent(conv, userText, model, send, () => clientGone || res.writableEnded, { mode });
+      await runAgent(conv, userText, model, send, () => clientGone || res.writableEnded, { mode, images: body.images });
     } catch (e) {
       console.error('[agent] 出错:', e);
       send({ type: 'error', message: e.message || String(e) });

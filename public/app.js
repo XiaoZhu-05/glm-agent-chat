@@ -18,6 +18,9 @@
     keyStatus: $('#key-status'),
     workspacePath: $('#workspace-path'),
     planToggle: $('#plan-toggle'),
+    attachBtn: $('#attach-btn'),
+    attachInput: $('#attach-input'),
+    attachBar: $('#attach-bar'),
   };
 
   const state = {
@@ -28,6 +31,7 @@
     abortCtrl: null,
     pinned: true,
     planMode: false,
+    images: [], // 待发送图片 dataURL 列表
   };
 
   /* ---------------- Markdown ---------------- */
@@ -372,12 +376,24 @@
     return { wrap, body };
   }
 
-  function makeUserBubble(text) {
+  function makeUserBubble(text, images = []) {
     const wrap = document.createElement('div');
     wrap.className = 'msg-user';
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = text;
+    if (images.length) {
+      const grid = document.createElement('div');
+      grid.className = 'bubble-images';
+      for (const src of images) {
+        const img = document.createElement('img');
+        img.src = src;
+        img.loading = 'lazy';
+        img.addEventListener('click', () => window.open(src, '_blank'));
+        grid.appendChild(img);
+      }
+      bubble.appendChild(grid);
+    }
     const avatar = document.createElement('div');
     avatar.className = 'avatar-user';
     avatar.textContent = '我';
@@ -418,7 +434,7 @@
 
     for (const msg of conv.messages) {
       if (msg.role === 'user') {
-        el.chat.appendChild(makeUserBubble(msg.content));
+        el.chat.appendChild(makeUserBubble(msg.content, msg.images || []));
         agentBody = null;
       } else if (msg.role === 'assistant') {
         if (!agentBody) {
@@ -562,13 +578,23 @@
 
   async function sendMessage(modeOverride) {
     const text = el.input.value.trim();
-    if (!text || state.streaming) return;
+    const images = state.images.slice();
+    if (!text && !images.length) return;
+    if (state.streaming) return;
     const mode = modeOverride === 'chat' || modeOverride === 'plan' ? modeOverride : state.planMode ? 'plan' : 'chat';
+
+    // 客户端预校验图片（服务端仍会兜底校验）
+    if (images.length && !(state.config.visionModels || []).includes(el.modelSelect.value)) {
+      toast(`当前模型 ${el.modelSelect.value} 不支持图片，请切换到 glm-4v-flash 等视觉模型`, 'error');
+      return;
+    }
 
     // 清掉空状态 / 追加用户气泡
     if (!el.chat.querySelector('.msg-user, .msg-agent')) el.chat.innerHTML = '';
-    el.chat.appendChild(makeUserBubble(text));
+    el.chat.appendChild(makeUserBubble(text, images));
     el.input.value = '';
+    state.images = [];
+    renderAttachBar();
     autoGrow();
     scrollBottom(true);
 
@@ -628,6 +654,7 @@
           conversationId: state.currentConvId,
           model: el.modelSelect.value || state.config.model,
           mode,
+          images,
         }),
         signal: state.abortCtrl.signal,
       });
@@ -723,6 +750,81 @@
     }
   }
 
+  /* ---------------- 附件（图片）上传 ---------------- */
+
+  const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+  const IMAGE_MAX_MB = 5;
+
+  function toast(msg, kind = 'info') {
+    let host = document.querySelector('#toast-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'toast-host';
+      document.body.appendChild(host);
+    }
+    const t = document.createElement('div');
+    t.className = 'toast ' + kind;
+    t.textContent = msg;
+    host.appendChild(t);
+    setTimeout(() => { t.classList.add('fade'); setTimeout(() => t.remove(), 300); }, 3500);
+  }
+
+  function renderAttachBar() {
+    const bar = el.attachBar;
+    bar.innerHTML = '';
+    bar.hidden = state.images.length === 0;
+    state.images.forEach((src, i) => {
+      const chip = document.createElement('div');
+      chip.className = 'img-chip';
+      const img = document.createElement('img');
+      img.src = src;
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'img-del';
+      del.textContent = '×';
+      del.title = '移除图片';
+      del.addEventListener('click', () => { state.images.splice(i, 1); renderAttachBar(); });
+      chip.append(img, del);
+      bar.appendChild(chip);
+    });
+  }
+
+  function readAsDataURL(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(new Error('读取文件失败'));
+      r.readAsDataURL(file);
+    });
+  }
+
+  el.attachBtn?.addEventListener('click', () => el.attachInput.click());
+  el.attachInput?.addEventListener('change', async () => {
+    const files = [...(el.attachInput.files || [])];
+    el.attachInput.value = '';
+    for (const f of files) {
+      if (!IMAGE_TYPES.includes(f.type)) {
+        toast(`「${f.name}」不是支持的图片格式（仅 PNG / JPG / WEBP）`, 'error');
+        continue;
+      }
+      if (f.size > IMAGE_MAX_MB * 1024 * 1024) {
+        toast(`「${f.name}」过大（${(f.size / 1048576).toFixed(1)}MB），单张上限 ${IMAGE_MAX_MB}MB`, 'error');
+        continue;
+      }
+      if (state.images.length >= 4) {
+        toast('单条消息最多 4 张图片', 'error');
+        break;
+      }
+      try {
+        const url = await readAsDataURL(f);
+        state.images.push(url);
+      } catch (e) {
+        toast(`「${f.name}」${e.message}`, 'error');
+      }
+    }
+    renderAttachBar();
+  });
+
   /* ---------------- 输入框 ---------------- */
 
   function autoGrow() {
@@ -754,8 +856,9 @@
   async function init() {
     try {
       state.config = await (await fetch('/api/config')).json();
+      state.config.visionModels = state.config.visionModels || ['glm-4v-flash'];
     } catch {
-      state.config = { model: 'glm-5.3', models: ['glm-5.3'], hasKey: false, workspace: '' };
+      state.config = { model: 'glm-5.3', models: ['glm-5.3'], hasKey: false, workspace: '', visionModels: ['glm-4v-flash'] };
     }
 
     // 模型下拉
