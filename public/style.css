@@ -199,30 +199,73 @@ body {
 
 .model-label { font-size: 13px; color: var(--text-3); }
 
-.model-select-wrap { position: relative; display: flex; align-items: center; }
-
-#model-select {
-  appearance: none;
-  -webkit-appearance: none;
+.model-select {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fff;
-  font-family: inherit;
+  padding: 5px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+  min-width: 120px;
+  justify-content: space-between;
+}
+
+.model-select:hover,
+.model-select:focus,
+.model-select.open {
+  border-color: var(--accent);
+}
+
+.model-select .ms-value {
   font-size: 13px;
   color: var(--text);
-  padding: 5px 28px 5px 10px;
-  cursor: pointer;
-  outline: none;
+  white-space: nowrap;
 }
 
-#model-select:focus { border-color: var(--accent); }
+.model-select .chev { color: var(--text-3); flex-shrink: 0; }
+.model-select.open .chev { transform: rotate(180deg); }
 
-.model-select-wrap .chev {
+.ms-menu {
+  display: none;
   position: absolute;
-  right: 8px;
-  pointer-events: none;
-  color: var(--text-3);
+  top: calc(100% + 6px);
+  right: 0;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
+  min-width: 180px;
+  padding: 4px;
+  z-index: 60;
 }
+
+.model-select.open .ms-menu { display: block; }
+
+.ms-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.ms-option:hover { background: #f0f4fb; }
+
+.ms-option.sel { color: var(--accent-deep); font-weight: 600; background: #eaf1ff; }
+
+.ms-option .ms-tag { font-size: 11px; color: var(--text-3); font-weight: 400; }
+.ms-option.sel .ms-tag { color: var(--accent); }
 
 /* ---------------- 聊天区 ---------------- */
 #chat-scroll {
