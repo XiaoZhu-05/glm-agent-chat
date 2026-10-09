@@ -444,8 +444,10 @@ const SYSTEM_PROMPT = `你是一个运行在用户电脑上的智能 Agent（类
 \`\`\`
 
 规则：
-- 选项必须互斥、覆盖主要可能性，通常 2-4 个；style=multi 表示可多选。
+- 选项必须互斥、覆盖主要可能性，【数量必须是 2-4 个】（只写 1 个选项是错误用法）；style=multi 表示可多选。
+- 示例：{"question":"你想处理哪种数据？","style":"single","options":["Excel/CSV 表格数据（清洗、统计）","文本数据（提取、总结）","代码/脚本数据（重构、调试）"]}
 - 输出选项卡片后立即停止，等待用户选择，不要自问自答。
+- 【重要】需求模糊时，你的第一反应就是提问：不要先调用工具探索，也不要在输出选项卡片的同时调用工具。等用户选择后再执行。
 - 需求已经明确时不要滥用此功能，直接执行。`;
 
 const PLAN_PROMPT_SUFFIX = `
@@ -680,7 +682,11 @@ async function runAgent(conv, userText, model, onEvent, isAborted, opts = {}) {
       ts: Date.now(),
     };
 
-    if (r.toolCalls.length && r.finishReason === 'tool_calls') {
+    // 硬约束：模型在输出澄清选项（```options）的回合不应执行动作——
+    // 即使它同时发起了 tool_calls 也忽略，等用户选择后再执行
+    const wantsClarify = /```options/.test(r.content || '');
+
+    if (r.toolCalls.length && r.finishReason === 'tool_calls' && !wantsClarify) {
       assistantMsg.tool_calls = r.toolCalls;
       conv.messages.push(assistantMsg);
       apiMessages.push({
