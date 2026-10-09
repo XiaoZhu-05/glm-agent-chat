@@ -294,11 +294,13 @@
     read_file: { label: '读取文件' },
     write_file: { label: '写入文件' },
     list_dir: { label: '列出目录' },
+    web_search: { label: '联网搜索' },
   };
 
   function toolCmdText(name, args) {
     args = args || {};
     if (name === 'run_command') return '$ ' + (args.command || '');
+    if (name === 'web_search') return '🔍 ' + (args.query || '');
     if (name === 'write_file') return `${args.path || ''}（${String(args.content ?? '').length} 字符）`;
     return args.path || '.';
   }
@@ -350,14 +352,29 @@
     return card;
   }
 
-  function fillToolResult(card, ok, output) {
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function fillToolResult(card, callName, ok, output) {
     card.classList.remove('running');
     const spin = card.querySelector('.tool-spinner');
     if (spin) spin.remove();
     const status = card.querySelector('.tool-status');
     status.textContent = ok ? '✓ 完成' : '✗ 出错';
     if (!ok) card.querySelector('.tool-badge').classList.add('err');
-    card.querySelector('.tool-output').textContent = output || '(无输出)';
+    const pre = card.querySelector('.tool-output');
+    if (callName === 'web_search' && ok && output) {
+      // 搜索结果渲染为可点击的溯源链接
+      const div = document.createElement('div');
+      div.className = 'tool-output html';
+      div.innerHTML = escapeHtml(output)
+        .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+        .replace(/\n/g, '<br>');
+      pre.replaceWith(div);
+    } else {
+      pre.textContent = output || '(无输出)';
+    }
     if ((output || '').length <= 400) card.classList.add('open');
   }
 
@@ -466,8 +483,8 @@
         for (const call of msg.tool_calls || []) {
           const card = makeToolCard(call);
           const toolMsg = (conv.messages || []).find((t) => t.role === 'tool' && t.tool_call_id === call.id);
-          if (toolMsg) fillToolResult(card, toolMsg.ok !== false, toolMsg.content);
-          else fillToolResult(card, true, '(运行中)');
+          if (toolMsg) fillToolResult(card, call.name, toolMsg.ok !== false, toolMsg.content);
+          else fillToolResult(card, call.name, true, '(运行中)');
           agentBody.appendChild(card);
         }
         if (msg.content) {
@@ -752,7 +769,7 @@
         case 'tool_result': {
           const cards = turn.body.querySelectorAll('.tool-card.running');
           const card = cards[cards.length - 1];
-          if (card) fillToolResult(card, evt.ok, evt.output);
+          if (card) fillToolResult(card, evt.name, evt.ok, evt.output);
           scrollBottom();
           break;
         }

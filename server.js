@@ -167,6 +167,20 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: '联网搜索公开网络信息。当问题涉及最新动态、版本号、时事、价格、资料出处等模型训练数据可能过时或缺失的内容时使用；返回带链接的搜索结果，回答时必须以 Markdown 链接引用来源。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '搜索关键词（中英文均可，必要时拆成多个关键词）' },
+        },
+        required: ['query'],
+      },
+    },
+  },
 ];
 
 function runCommand(command) {
@@ -201,6 +215,8 @@ async function executeTool(name, args) {
       const items = fs.readdirSync(p, { withFileTypes: true }).map((d) => (d.isDirectory() ? d.name + '/' : d.name));
       return items.length ? items.join('\n') : '(空目录)';
     }
+    case 'web_search':
+      return webSearch(args.query || '');
     default:
       throw new Error(`未知工具：${name}`);
   }
@@ -311,12 +327,100 @@ async function extractDocument(savedPath, name, ext) {
   }
 }
 
+/* ---------------------------- 联网搜索（web_search） ---------------------------- */
+
+const SEARCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+function fetchWithTimeout(url, opts = {}, ms = 10000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { ...opts, signal: ctrl.signal }).finally(() => clearTimeout(t));
+}
+
+function decodeEntities(s) {
+  return String(s)
+    .replace(/&#(\d+);/g, (m, d) => String.fromCharCode(+d))
+    .replace(/&#x([0-9a-f]+);/gi, (m, d) => String.fromCharCode(parseInt(d, 16)))
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ');
+}
+
+function stripTags(s) {
+  return decodeEntities(String(s).replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+
+async function searchDuckDuckGo(query) {
+  const res = await fetchWithTimeout(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+    headers: { 'User-Agent': SEARCH_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
+  });
+  if (res.status === 403 || res.status === 429) throw new Error('被限流（HTTP ' + res.status + '）');
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const html = await res.text();
+  const results = [];
+  const re = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+  let m;
+  while ((m = re.exec(html)) && results.length < 6) {
+    let url = decodeEntities(m[1]);
+    const uddg = url.match(/[?&]uddg=([^&]+)/);
+    if (uddg) url = decodeURIComponent(uddg[1]);
+    if (url.startsWith('//')) url = 'https:' + url;
+    const title = stripTags(m[2]);
+    if (title && /^https?:\/\//.test(url)) results.push({ title, url, snippet: '' });
+  }
+  const sre = /class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
+  let i = 0;
+  let sm;
+  while ((sm = sre.exec(html)) && i < results.length) {
+    results[i].snippet = stripTags(sm[1]).slice(0, 200);
+    i++;
+  }
+  if (!results.length) throw new Error('未解析到结果（页面结构变化或被反爬）');
+  return results;
+}
+
+async function searchBing(query) {
+  const res = await fetchWithTimeout(`https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=zh-hans`, {
+    headers: { 'User-Agent': SEARCH_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
+  });
+  if (res.status === 403 || res.status === 429) throw new Error('被限流（HTTP ' + res.status + '）');
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const html = await res.text();
+  const results = [];
+  const re = /<li class="b_algo"[\s\S]*?<h2[^>]*><a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h2>([\s\S]*?)<\/li>/g;
+  let m;
+  while ((m = re.exec(html)) && results.length < 6) {
+    const url = decodeEntities(m[1]);
+    const title = stripTags(m[2]);
+    const snippet = stripTags(m[3]).slice(0, 200);
+    if (title && /^https?:\/\//.test(url)) results.push({ title, url, snippet });
+  }
+  if (!results.length) throw new Error('未解析到结果（页面结构变化或被反爬）');
+  return results;
+}
+
+/** web_search 工具实现：DDG → Bing 双引擎降级；全失败时抛出带原因的错误 */
+async function webSearch(query) {
+  const engines = [['DuckDuckGo', searchDuckDuckGo], ['Bing', searchBing]];
+  const errors = [];
+  for (const [name, fn] of engines) {
+    try {
+      const rs = await fn(query);
+      return `搜索「${query}」（引擎：${name}，时间：${new Date().toISOString()}）的结果：\n` +
+        rs.map((r, i) => `${i + 1}. [${r.title}](${r.url})\n   ${r.snippet || '（无摘要）'}`).join('\n');
+    } catch (e) {
+      errors.push(`${name}：${/abort/i.test(e.name || '') ? '超时（>10s）' : e.message}`);
+    }
+  }
+  throw new Error(`联网搜索失败（${errors.join('；')}）。可能是网络不可达或被搜索引擎限流，请稍后重试或改用本地资料。`);
+}
+
 /* ---------------------------- GLM 流式调用 ---------------------------- */
 
 const SYSTEM_PROMPT = `你是一个运行在用户电脑上的智能 Agent（类似 DeepSeek Harness 的代理运行时），你的工作目录是 "${WORKSPACE_DIR}"。
 你可以调用工具来完成任务：
 - run_command：在工作区执行 shell 命令（查看文件、跑脚本、git 等）
 - read_file / write_file / list_dir：管理工作区文件
+- web_search：联网搜索最新信息。涉及时事、版本号、价格、最新资料时优先使用它而不是凭记忆回答，且回答中必须用 Markdown 链接标注来源。
 
 使用原则：
 1. 简单闲聊或知识问答直接回答，不必调用工具。
