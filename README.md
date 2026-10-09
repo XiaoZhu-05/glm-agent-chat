@@ -58,7 +58,7 @@ node server.js          # 或 npm start
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `GLM_API_KEY` | （必填） | 智谱开放平台 API Key |
-| `GLM_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | OpenAI 兼容接口地址（可换成 `https://api.z.ai/api/paas/v4`） |
+| `GLM_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | OpenAI 兼容接口地址（可换成 `https://api.z.ai/api/paas/v4`）。⚠️ GLM Coding Plan 订阅 key 无按量余额，请改用 `https://open.bigmodel.cn/api/coding/paas/v4`，否则付费模型报 429「余额不足或无可用资源包」 |
 | `GLM_MODEL` | `glm-5.3` | 默认模型 |
 | `GLM_MODELS` | `glm-5.3,glm-4.6,...` | 界面可切换的模型列表 |
 | `PORT` | `3210` | 服务端口 |
