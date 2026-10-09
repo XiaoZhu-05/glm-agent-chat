@@ -58,6 +58,10 @@ const CONFIG = {
   nvidiaApiKey: process.env.NVIDIA_API_KEY || '',
   nimBaseUrl: (process.env.NIM_BASE_URL || 'https://health.api.nvidia.com/v1/biology/nvidia/esmfold').replace(/\/+$/, ''),
   nimTimeoutMs: parseInt(process.env.NIM_TIMEOUT_MS || '120000', 10),
+  // Biomni（子 agent，独立 venv 子进程）
+  biomniPython: process.env.BIOMNI_PYTHON || '',
+  biomniModel: process.env.BIOMNI_MODEL || 'glm-4.5-flash',
+  biomniTimeoutMs: parseInt(process.env.BIOMNI_TIMEOUT_MS || '300000', 10),
   maxSteps: parseInt(process.env.AGENT_MAX_STEPS || '8', 10),
   cmdTimeoutMs: parseInt(process.env.CMD_TIMEOUT_MS || '30000', 10),
   maxToolOutput: parseInt(process.env.MAX_TOOL_OUTPUT || '6000', 10),
@@ -203,6 +207,20 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'biomni_task',
+      description: '调用 Biomni 生物医学研究子 agent（Stanford 出品，30+ 生物工具域：基因组/蛋白/文献检索/数据库查询等）执行复杂的多步研究任务。注意：Biomni 会自主规划并执行 Python 代码，单次任务可能耗时 2-5 分钟，结果可能不收敛；适合深度生物信息学分析，简单的序列计算或文件处理直接用 run_command 即可。',
+      parameters: {
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: '交给 Biomni 的完整任务描述（含输入数据与期望输出，中文或英文）' },
+        },
+        required: ['task'],
+      },
+    },
+  },
 ];
 
 function runCommand(command) {
@@ -241,6 +259,8 @@ async function executeTool(name, args) {
       return webSearch(args.query || '');
     case 'protein_structure':
       return predictProteinStructure(args.sequence || '');
+    case 'biomni_task':
+      return runBiomniTask(String(args.task || ''));
     default:
       throw new Error(`未知工具：${name}`);
   }
@@ -508,6 +528,61 @@ async function predictProteinStructure(rawSequence) {
   fs.writeFileSync(fp, pdb, 'utf8');
   const atoms = (pdb.match(/^ATOM/gm) || []).length;
   return `结构预测成功。\n- 输入序列：${seq.length} 个氨基酸\n- ATOM 记录：${atoms} 条\n- PDB 文件已保存：workspace/${file}\n（可用 read_file 查看完整 PDB 内容）`;
+}
+
+/* ---------------------------- Biomni（生物医学子 agent） ---------------------------- */
+
+/**
+ * biomni_task 工具实现：spawn 独立 venv 子进程运行 Biomni A1。
+ * 沙箱：子进程 cwd 锁定 workspace/biomni；主进程绝不 eval；
+ *       11GB 数据湖跳过；超时由父进程 kill。
+ */
+function runBiomniTask(task) {
+  return new Promise((resolve) => {
+    if (!CONFIG.biomniPython) {
+      resolve('未配置 BIOMNI_PYTHON：Biomni 需要独立 venv（见 README「Biomni 集成」），在 .env 中配置其 python.exe 路径后重启服务。');
+      return;
+    }
+    const sandboxDir = path.join(WORKSPACE_DIR, 'biomni');
+    fs.mkdirSync(sandboxDir, { recursive: true });
+    const payload = JSON.stringify({
+      task,
+      model: CONFIG.biomniModel,
+      baseUrl: CONFIG.baseUrl,
+      apiKey: CONFIG.apiKey,
+    });
+
+    const child = execFile(
+      CONFIG.biomniPython,
+      [path.join(TOOLS_DIR, 'biomni_runner.py')],
+      {
+        cwd: sandboxDir,
+        timeout: CONFIG.biomniTimeoutMs,
+        maxBuffer: 32 * 1024 * 1024,
+        windowsHide: true,
+      },
+      (err, stdout, stderr) => {
+        const out = String(stdout || '');
+        const errMark = out.lastIndexOf('===BIOMNI_ERROR===');
+        if (errMark >= 0) {
+          resolve(truncate(`Biomni 运行出错：${out.slice(errMark + 17).trim()}\n--- stderr 尾部 ---\n${String(stderr || '').slice(-400)}`, CONFIG.maxToolOutput));
+          return;
+        }
+        const mark = out.lastIndexOf('===BIOMNI_RESULT===');
+        if (mark >= 0) {
+          const result = out.slice(mark + 19).trim();
+          const logTail = out.slice(0, mark).trim().slice(-1200);
+          resolve(truncate(`Biomni 任务结束。\n--- 最终结果 ---\n${result}\n\n--- 过程日志（尾部） ---\n${logTail}`, CONFIG.maxToolOutput));
+          return;
+        }
+        // 无标记：超时被 kill 或中途异常
+        const hint = err && err.killed ? `（超时 >${CONFIG.biomniTimeoutMs / 1000}s 被终止）` : err ? `（${err.message.slice(0, 100)}）` : '';
+        resolve(truncate(`Biomni 未产出最终结果${hint}。链路已运行，过程日志尾部：\n${out.slice(-1000) || '(无输出)'}\n--- stderr 尾部 ---\n${String(stderr || '').slice(-400)}`, CONFIG.maxToolOutput));
+      }
+    );
+    child.stdin.write(payload);
+    child.stdin.end();
+  });
 }
 
 /* ---------------------------- GLM 流式调用 ---------------------------- */
