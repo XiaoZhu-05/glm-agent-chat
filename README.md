@@ -32,6 +32,8 @@ ONLY=T6 node tests/e2e.mjs     # 只跑某一组（T1~T6）
 | 📄 文件解析 | PDF（文本层，扫描件明确提示不支持 OCR）、Excel（多 sheet/公式值/合并单元格）、FASTA（序列统计）、CSV/TXT/MD/JSON | ✅ 已验证 |
 | 🔁 多轮上下文 | 6 轮指代消解通过；>40 条自动截断中段（保留任务背景） | ✅ 已验证 |
 | 🌐 联网查询 | `web_search` 工具，DDG→Bing 降级，10s 超时，结果可溯源 | ✅ 已验证 |
+| 🧬 蛋白结构预测 | `protein_structure` 工具（NVIDIA BioNeMo ESMFold NIM 云端），PDB 自动落盘 | ✅ 已验证（降级路径；真实调用待 NVIDIA_API_KEY） |
+| 🧫 生物医学子 agent | `biomni_task` 工具（Stanford Biomni，独立 venv 子进程沙箱，跳过 11GB 数据湖） | ✅ 链路已验证（免费模型下任务可能超时降级） |
 | ❓ 需求澄清 | 模糊需求输出 2-4 个互斥选项（单选/多选/自定义），先问后做 | ✅ 已验证 |
 | 🗂 会话持久化 | 服务端 JSON 存储 | ✅ 已验证 |
 
@@ -68,6 +70,24 @@ node server.js          # 或 npm start
 | `MAX_ATTACHMENT_CHARS` | `8000` | 附件注入上下文的最大字符数 |
 | `CONTEXT_WINDOW_MESSAGES` | `40` | 超过则截断中段历史 |
 | `PYTHON_BIN` | `python` | PDF/Excel 解析所用 Python（需 pypdf、openpyxl） |
+| `NVIDIA_API_KEY` | （空） | BioNeMo ESMFold 蛋白结构预测，免费注册：https://build.nvidia.com |
+| `BIOMNI_PYTHON` | （空） | Biomni 独立 venv 内 python 的绝对路径 |
+| `BIOMNI_MODEL` | `glm-4.5-flash` | Biomni 使用的模型（复用 GLM_API_KEY） |
+| `BIOMNI_TIMEOUT_MS` | `300000` | Biomni 单任务超时 |
+
+## 🧫 Biomni 集成（可选）
+
+`biomni_task` 工具需要独立 venv（避免与主环境依赖冲突）：
+
+```bash
+python -m venv biomni-venv
+biomni-venv/Scripts/python -m pip install biomni pandas langchain_openai tqdm
+# 然后在 .env 中配置：
+# BIOMNI_PYTHON=<绝对路径>/biomni-venv/Scripts/python.exe
+```
+
+沙箱设计：子进程运行、cwd 锁定 `workspace/biomni`、跳过 11GB 数据湖、300s 超时由父进程终止。
+注意：Biomni 会执行 LLM 生成的代码，生产环境建议进一步容器化；免费 flash 模型下任务可能不收敛（会如实返回过程日志，主 Agent 会自动降级接管）。
 | `AGENT_MAX_STEPS` | `8` | 单轮对话最大工具调用步数 |
 | `CMD_TIMEOUT_MS` | `30000` | 单条命令超时 |
 | `MAX_TOOL_OUTPUT` | `6000` | 工具输出最大字符数（超出截断） |

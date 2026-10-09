@@ -2,6 +2,21 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号语义见 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-10-09 —— 工具接入版（v0.3.0-tools）
+
+依据《BioNeMo与Biomni集成调研报告.md》实施，硬约束：零部署、零后端运维、不下载大数据、不产生费用。
+
+### 新增
+
+- **`protein_structure` 工具（BioNeMo / NVIDIA NIM 云端 ESMFold）**：蛋白质三维结构预测。FASTA 自动清洗、长度/字母表校验、PDB 落盘 `workspace/pdb/`、401/429/超时分类友好提示；前端复用工具卡片，零改动。
+- **`biomni_task` 工具（Stanford Biomni 生物医学子 agent）**：独立 venv 子进程沙箱（主进程零依赖、零 eval）、cwd 锁定 `workspace/biomni`、跳过 11GB 数据湖、GLM 兼容端点驱动、300s 超时父进程终止并返回过程日志。
+- 复现脚本：`tests/bionemo_check.mjs`、`tests/biomni_check.mjs`。
+
+### 已验证 / 未验证项（如实）
+
+- ✅ 已验证：两工具均注册进 TOOLS 且模型可自主调用；BioNeMo 无 key 友好降级；Biomni 子进程真实运行（ReAct 日志）、超时终止与主 Agent 降级接管（run_command 完成任务）；全量回归 22/22。
+- ⏸ 待验证：BioNeMo **真实 NIM 调用**（需注册 build.nvidia.com 获取 `NVIDIA_API_KEY`，占位模式）；Biomni 任务级收敛（免费 glm-4.5-flash 对其提示格式遵循不足，需更强模型/充值）。
+
 ## [0.2.0] - 2026-10-09 —— 功能验证版（v0.2.0-verified）
 
 在 `test/feature-verification` 分支完成六项新功能开发与全量功能验证（E2E 22/22 通过，真实 API）。
