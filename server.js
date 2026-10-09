@@ -50,6 +50,7 @@ const CONFIG = {
   xlsxMaxRows: parseInt(process.env.XLSX_MAX_ROWS || '200', 10),
   maxAttachmentChars: parseInt(process.env.MAX_ATTACHMENT_CHARS || '8000', 10),
   pythonBin: process.env.PYTHON_BIN || 'python',
+  contextWindowMessages: parseInt(process.env.CONTEXT_WINDOW_MESSAGES || '40', 10),
   maxSteps: parseInt(process.env.AGENT_MAX_STEPS || '8', 10),
   cmdTimeoutMs: parseInt(process.env.CMD_TIMEOUT_MS || '30000', 10),
   maxToolOutput: parseInt(process.env.MAX_TOOL_OUTPUT || '6000', 10),
@@ -539,14 +540,30 @@ async function streamCompletion(messages, tools, model, onEvent) {
 
 /* ---------------------------- Agent 循环（harness 核心） ---------------------------- */
 
-/** 把存储中的会话消息转成 API 消息（去掉 reasoning，保留 tool_calls/tool 轮次；历史图片限流） */
+/** 把存储中的会话消息转成 API 消息（去掉 reasoning，保留 tool_calls/tool 轮次；历史图片限流；超长截断） */
 function toApiMessages(convMessages, visionModel) {
   const out = [{ role: 'system', content: SYSTEM_PROMPT }];
+
+  // 超长对话截断：保留首条 user（任务背景）+ 截断说明 + 最近 N 条
+  // 起点若落在 tool 消息上则后移，避免 assistant(tool_calls) 与 tool 结果被拆散导致 API 报错
+  let msgs = convMessages;
+  if (convMessages.length > CONFIG.contextWindowMessages) {
+    let start = convMessages.length - CONFIG.contextWindowMessages;
+    while (start < convMessages.length && convMessages[start].role === 'tool') start++;
+    const firstUserIdx = convMessages.findIndex((m) => m.role === 'user');
+    const head = firstUserIdx >= 0 && firstUserIdx < start ? [convMessages[firstUserIdx]] : [];
+    msgs = [
+      ...head,
+      { role: 'assistant', content: `（系统注：为控制上下文长度，中间约 ${start - head.length} 条历史消息已被截断，对话仍可继续。）` },
+      ...convMessages.slice(start),
+    ];
+  }
+
   // 仅保留最近 3 条带图消息的图片，更早的用占位文本，避免上下文膨胀
   const imgIdx = [];
-  convMessages.forEach((m, i) => { if (m.role === 'user' && m.images?.length) imgIdx.push(i); });
+  msgs.forEach((m, i) => { if (m.role === 'user' && m.images?.length) imgIdx.push(i); });
   const keepImg = new Set(imgIdx.slice(-3));
-  convMessages.forEach((m, i) => {
+  msgs.forEach((m, i) => {
     if (m.role === 'user') {
       let text = m.content;
       // 附件提取文本注入（原始文件已存于工作区，模型可用 read_file 深入查看）
