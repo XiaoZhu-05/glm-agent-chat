@@ -237,7 +237,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'everyinfra_data',
-      description: '调用 EveryInfra 数据平台 API：① 采集 90 个平台的公开数据（小红书/抖音/B站/知乎/微博/淘宝/TikTok/YouTube/Reddit 等，动作如 search/profile/note/comments/trending）；② 17 种联网搜索工具（web/news/scholar/semantic/crawl/read/crosscheck 等）。首次使用先用 kind=catalog 查平台与动作清单（免 key）；social/search 是付费调用（约 ¥0.005~0.04/次），仅在用户明确要求数据采集时使用，不要为试探而调用。结果自动保存完整 JSON 到工作区 everyinfra/ 目录并返回预览，支持 next_page_token 翻页与异步任务轮询。',
+      description: '调用 EveryInfra 数据平台 API：① 采集 90 个平台的公开数据（小红书/抖音/B站/知乎/微博/淘宝/TikTok/YouTube/Reddit 等，动作如 search/profile/note/comments/trending）；② 17 种联网搜索工具（web/news/scholar/semantic/crawl/read/crosscheck 等）。首次使用先用 kind=catalog 查平台与动作清单（免 key）；social/search 是付费调用（约 ¥0.005~0.04/次），仅在用户明确要求数据采集时使用，不要为试探而调用。参数只能填 catalog 列出的允许值（「参数名: 值1|值2」格式），拿不准就不填；被 422 拒绝时按报错中的允许值修正参数后立即重试，不要放弃。结果自动保存完整 JSON 到工作区 everyinfra/ 目录并返回预览，支持 next_page_token 翻页与异步任务轮询。',
       parameters: {
         type: 'object',
         properties: {
@@ -806,6 +806,10 @@ async function eiHandle(tag, { status, data }) {
   }
   if (status === 402) throw new Error('EveryInfra 账户额度不足（HTTP 402）：请到 https://console.everyinfra.com 的 Billing 页兑换额度码或充值。');
   if (status === 429) throw new Error('EveryInfra 限流（HTTP 429），请间隔几秒后重试。');
+  if (status === 422) {
+    const detail = data?.error?.message || truncate(JSON.stringify(data), 300);
+    throw new Error(`EveryInfra 参数值无效（HTTP 422）：${detail}。请按报错中列出的允许值修正参数后立即重试；不确定取值就用 kind=catalog&platform=<平台名> 查询参数允许值。`);
+  }
   if (status === 404) throw new Error(`接口或参数不存在（HTTP 404）：${truncate(JSON.stringify(data), 200)}。可用 kind=catalog 核对平台/动作/工具名。`);
   if (status >= 400) throw new Error(`EveryInfra 请求失败（HTTP ${status}）：${truncate(JSON.stringify(data), 300)}`);
   return eiSaveResult(tag, data);
@@ -827,15 +831,20 @@ async function everyinfraData(args) {
       const r = await eiRequest(`/api/v1/social/catalog?platform=${encodeURIComponent(platform)}`);
       if (r.status === 404) throw new Error(`平台「${platform}」不存在。先用 kind=catalog（不带 platform）获取支持的完整平台列表。`);
       if (!r.ok) throw new Error(`catalog 查询失败（HTTP ${r.status}）：${truncate(JSON.stringify(r.data), 200)}`);
-      // 真实结构：{platforms:[全量名], capabilities:[{action,action_label,required_params,optional_params,mode,cost_credits,price_cny}]}
+      // 真实结构：{platforms:[全量名], capabilities:[{action,action_label,required_params,optional_params,mode,cost_credits,price_cny,param_meanings:{参数:{allowed_values:[...]}}}]}
       const caps = (r.data?.capabilities || []).filter((c) => String(c.platform || '').toLowerCase() === platform);
       if (!caps.length) return `平台「${platform}」暂无能力目录（catalog 响应：${truncate(JSON.stringify(r.data), 800)}）`;
+      // 参数名后附允许值（param_meanings.allowed_values）：模型只能从列出的值里选，杜绝靠猜导致的 422
+      const fmtParams = (names, meanings) => names.map((p) => {
+        const av = meanings?.[p]?.allowed_values;
+        return Array.isArray(av) && av.length ? `${p}: ${av.join('|')}` : p;
+      }).join(',');
       const lines = caps.map((c) => {
-        const req = (c.required_params || []).join(',');
-        const opt = (c.optional_params || []).filter((p) => p !== 'page_token').join(',');
+        const req = fmtParams(c.required_params || [], c.param_meanings);
+        const opt = fmtParams((c.optional_params || []).filter((p) => p !== 'page_token'), c.param_meanings);
         return `- ${c.action}（${c.action_label || c.action}${c.mode === 'async' ? '，仅异步' : ''}）：params 必填 {${req}}${opt ? `，可选 {${opt}}` : ''}；¥${c.price_cny ?? '?'} /次`;
       });
-      return `平台「${platform}」支持的动作（发起请求用 kind=social, platform=${platform}, action=<动作>，params 按下方必填/可选填写）：\n${lines.join('\n')}`;
+      return `平台「${platform}」支持的动作（发起请求用 kind=social, platform=${platform}, action=<动作>，params 按下方必填/可选填写；带「参数名: 值1|值2」的只能从允许值里选，拿不准就不填该参数）：\n${lines.join('\n')}`;
     }
     const [c, t] = await Promise.all([
       eiRequest('/api/v1/social/catalog'),
@@ -901,8 +910,9 @@ const SYSTEM_PROMPT = `你是一个运行在用户电脑上的智能 Agent（类
 1. 简单闲聊或知识问答直接回答，不必调用工具。
 2. 涉及文件、命令、代码验证、数据处理等实际操作时，先思考计划，再调用工具，并根据工具结果继续或总结。
 3. 用户消息可能附带 [附件 ...] 块（PDF/Excel/FASTA/文本的提取内容）：优先依据附件内容回答；若提取内容被截断或需要更多细节，可用 read_file 读取附件的完整原始文件（附件块中给出了工作区路径）。图片附件会直接出现在消息里，用视觉能力理解它。
-4. 工具输出可能被截断，注意甄别。
-5. 默认使用中文回答。回答使用 Markdown 格式，代码用代码块包裹。
+4. 工具执行出错时必须自我纠正，禁止空回复结束：错误信息通常写明原因和允许取值，读懂后修正参数，在下一轮立即重试（同一处错误最多重试 2 次）；确实无法修复才向用户说明原因与建议。
+5. 工具输出可能被截断，注意甄别。
+6. 默认使用中文回答。回答使用 Markdown 格式，代码用代码块包裹。
 
 【需求不明确时必须澄清】
 当用户的需求模糊、存在多种合理理解、或缺少关键参数时，不要猜测着直接动手。先输出一个选项卡片向用户提问，格式为（严格遵守，便于前端解析）：
