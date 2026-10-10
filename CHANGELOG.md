@@ -11,13 +11,13 @@
   - 完整 JSON 自动落盘 `workspace/everyinfra/`，工具输出返回摘要预览 + `next_page_token` 翻页指引；
   - 202 异步任务自动轮询（每 2s，默认上限 120s，超时提示用 `kind=job` 续查，结果自动解包 `result` 字段）；
   - 友好报错全覆盖：未配 key（含 console 开通指引）/ 401 / 402 额度不足（提示兑换额度码）/ 404 / 429 / 网络不可达（提示配 `EVERYINFRA_PROXY`）；
-  - 可选代理：`.env` 配 `EVERYINFRA_PROXY` 时经 undici `ProxyAgent` 出站（项目默认零依赖不变，需 `npm install undici`）——api.everyinfra.com 境内网络常直连不通。
+  - 可选代理：`.env` 配 `EVERYINFRA_PROXY` 时经**内置 HTTP CONNECT 隧道**出站（纯 Node 内置模块实现，含 chunked/gzip 解析，项目零依赖不变）——api.everyinfra.com 境内网络常直连不通。
 - `server.js` 增加 `require.main` 守卫并导出 `executeTool` 等，支持测试直接 require（不影响直接运行）。
 - 验证脚本 `tests/everyinfra_check.mjs`：自包含本地 mock（无需服务/GLM/外网），12/12 通过。
 
 ### 已验证 / 未验证项（如实）
 
-- ✅ 已验证：mock 全路径 12/12（目录/404/未配 key/401/同步落盘+翻页/`page_token` 翻页/202 异步轮询/search 透传/注册表/网络不可达提示代理）；E2E 回归 22/22 无退化；真实聊天链路中模型正确调用工具且被阻断网络下优雅降级（提示配代理）。
+- ✅ 已验证：mock 全路径 12/12（目录/404/未配 key/401/同步落盘+翻页/`page_token` 翻页/202 异步轮询/search 透传/注册表/网络不可达提示代理）+ 代理隧道单测（本地 CONNECT 代理：明文/压缩/鉴权透传）；E2E 回归 22/22 无退化；真实聊天链路中模型正确调用工具且被阻断网络下优雅降级（提示配代理）；真实 API 走本机代理调通 `catalog`（免 key）。
 - ⏸ 待验证：**真实 API 调用**——需 ① 用户在 [console.everyinfra.com](https://console.everyinfra.com) 兑换额度码（24h 有效）并创建 API key；② 本机网络可达 api.everyinfra.com 或配置 `EVERYINFRA_PROXY`。
 
 ### 修复

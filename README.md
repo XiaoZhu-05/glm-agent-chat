@@ -81,7 +81,7 @@ node server.js          # 或 npm start
 | `EVERYINFRA_BASE_URL` | `https://api.everyinfra.com` | API 地址（一般不用改） |
 | `EVERYINFRA_TIMEOUT_MS` | `30000` | 单次请求超时 |
 | `EVERYINFRA_JOB_MAX_WAIT_MS` | `120000` | 异步任务最长等待，超时后可 `kind=job` 续查 |
-| `EVERYINFRA_PROXY` | （空） | 可选代理（需 `npm install undici`），见下方 EveryInfra 章节 |
+| `EVERYINFRA_PROXY` | （空） | 可选代理（内置 CONNECT 隧道，零依赖），见下方 EveryInfra 章节 |
 | `AGENT_MAX_STEPS` | `8` | 单轮对话最大工具调用步数 |
 | `CMD_TIMEOUT_MS` | `30000` | 单条命令超时 |
 | `MAX_TOOL_OUTPUT` | `6000` | 工具输出最大字符数（超出截断） |
@@ -125,7 +125,8 @@ biomni-venv/Scripts/python -m pip install biomni pandas langchain_openai tqdm
 
 > ⚠️ 网络说明：`api.everyinfra.com` 在部分网络环境（如境内直连）不通。若工具报
 > 「网络请求失败」，在 `.env` 配置 `EVERYINFRA_PROXY=http://127.0.0.1:<本机代理端口>`
-> 并执行一次 `npm install undici`（代理为可选能力，默认保持零依赖）后重启服务。
+> 后重启服务即可（内置 HTTP CONNECT 隧道实现，零依赖，常见端口：Clash Verge 7897 /
+> Clash 7890 / v2rayN 10809）。
 
 > 模型可用性取决于账号余额/资源包：`glm-5.3` 等旗舰模型需要充值；
 > `glm-4.5-flash`、`glm-4-flash` 通常有免费额度，可用于体验完整功能（含思考链）。
