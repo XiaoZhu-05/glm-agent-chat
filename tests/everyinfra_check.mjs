@@ -7,10 +7,13 @@
  *     直接调用 executeTool('everyinfra_data') 走完整请求/落地/分页/异步轮询链路
  * 覆盖：目录查询（免 key）/ 平台目录 404 / 未配 key 友好报错 / key 无效 401 /
  *       同步结果落盘+翻页提示 / page_token 翻页 / 202 异步任务轮询 / search 工具 /
- *       网络不可达提示代理 / TOOLS 注册表
- * 注：EVERYINFRA_PROXY 代理路径涉及真实代理与可选依赖 undici，需在有代理的机器上手工验证。
+ *       网络不可达提示代理 / TOOLS 注册表 /
+ *       内置 CONNECT 代理隧道（http 目标明文、gzip 解压、鉴权透传、CONNECT 被拒）
+ * 注：https 目标经代理的 TLS 隧道（真实 Clash + 真实 API）在本机手工验证（见 PR）。
  */
 import http from 'node:http';
+import net from 'node:net';
+import zlib from 'node:zlib';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -29,29 +32,43 @@ function record(id, name, expected, actual, pass, evidence = '') {
 }
 
 /* ---------------- mock EveryInfra API ---------------- */
-const state = { jobPolls: 0, socialBodies: [], searchBodies: [], authSeen: new Set() };
+const state = { jobPolls: 0, socialBodies: [], searchBodies: [], authSeen: new Set(), connects: 0 };
 
 const mockServer = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://mock');
   const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+  // chunked + gzip 变体：模拟真实 API 的压缩传输，验证代理隧道的解压/分块解析
+  const sendGzipChunked = (code, obj) => {
+    const buf = zlib.gzipSync(JSON.stringify(obj));
+    res.writeHead(code, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Transfer-Encoding': 'chunked' });
+    res.write(buf.subarray(0, 10)); // 强制分块
+    setTimeout(() => res.end(buf.subarray(10)), 30);
+  };
   const auth = req.headers.authorization || '';
   if (auth) state.authSeen.add(auth);
 
   if (req.method === 'GET' && url.pathname === '/api/v1/social/catalog') {
     const p = url.searchParams.get('platform');
-    if (!p) return send(200, { object: 'social.catalog', platforms: ['xiaohongshu', 'douyin', 'bilibili', 'reddit'] });
-    if (p === 'xiaohongshu') return send(200, { platform: 'xiaohongshu', actions: [{ action: 'search', parameters: { query: { type: 'string' } }, credits: 400 }, { action: 'note', parameters: { note_id: { type: 'string' } }, credits: 400 }] });
-    return send(404, { error: `platform '${p}' not found` });
+    // 与真实 API 同构：platforms 恒为全量列表，capabilities 按 ?platform= 过滤
+    const allPlatforms = ['xiaohongshu', 'douyin', 'bilibili', 'reddit'];
+    const allCaps = [
+      { platform: 'xiaohongshu', action: 'search', action_label: '关键词搜索', required_params: ['keyword'], optional_params: ['page_token', 'sort'], mode: 'sync', cost_credits: 400, price_cny: 0.037258 },
+      { platform: 'xiaohongshu', action: 'note', action_label: '笔记详情', required_params: ['url'], optional_params: [], mode: 'sync', cost_credits: 400, price_cny: 0.037258 },
+      { platform: 'douyin', action: 'search', action_label: '关键词搜索', required_params: ['keyword'], optional_params: ['page_token'], mode: 'sync', cost_credits: 400, price_cny: 0.037258 },
+    ];
+    if (!p) return sendGzipChunked(200, { object: 'social.catalog', platforms: allPlatforms, capabilities: allCaps });
+    if (!allPlatforms.includes(p)) return send(404, { error: `platform '${p}' not found` });
+    return send(200, { platforms: allPlatforms, capabilities: allCaps.filter((c) => c.platform === p) });
   }
   if (req.method === 'GET' && url.pathname === '/api/v1/search/tools') {
-    return send(200, { object: 'search.tools', tools: [{ tool: 'web', credits: 50 }, { tool: 'scholar', credits: 50 }] });
+    return send(200, { object: 'search.tools', tools: [{ tool: 'web', description: '网页搜索', required_params: ['q'], optional_params: ['page'], units: 1, price_credits: 50, price_cny: 0.005 }, { tool: 'scholar', description: '学术搜索', required_params: ['q'], optional_params: [], units: 1, price_credits: 50, price_cny: 0.005 }] });
   }
   if (req.method === 'POST' && url.pathname === '/api/v1/social') {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
       const b = JSON.parse(body || '{}');
-      state.socialBodies.push(b);
+      state.socialBodies.push({ ...b, __auth: auth });
       if (auth !== 'Bearer test-key') return send(401, { error: 'invalid api key' });
       if (b.action === 'trending') return send(202, { object: 'job', job_id: 'job_e2e001' });
       if (b.params?.page_token === 'pg2') return send(200, { data: [{ tag: '第二页' }], next_page_token: 'pg3' });
@@ -64,7 +81,7 @@ const mockServer = http.createServer((req, res) => {
     req.on('data', (c) => (body += c));
     req.on('end', () => {
       const b = JSON.parse(body || '{}');
-      state.searchBodies.push(b);
+      state.searchBodies.push({ ...b, __auth: auth });
       if (auth !== 'Bearer test-key') return send(401, { error: 'invalid api key' });
       return send(200, { results: [{ title: 'Mocked result', url: 'https://example.com/1' }] });
     });
@@ -81,6 +98,33 @@ const mockServer = http.createServer((req, res) => {
 await new Promise((r) => mockServer.listen(0, '127.0.0.1', r));
 const MOCK = `http://127.0.0.1:${mockServer.address().port}`;
 console.log(`mock EveryInfra API: ${MOCK}`);
+
+/* ---------------- mock 本地 CONNECT 代理（模拟 Clash 等） ---------------- */
+const connectProxy = net.createServer((socket) => {
+  socket.once('data', (buf) => {
+    const head = buf.toString('latin1');
+    if (!head.startsWith('CONNECT')) { socket.write('HTTP/1.1 400 Bad Request\r\n\r\n'); return socket.end(); }
+    state.connects++;
+    const [host, port] = head.split(/\s+/)[1].split(':');
+    const upstream = net.connect(+port, host, () => {
+      socket.write('HTTP/1.1 200 Connection established\r\n\r\n');
+      upstream.pipe(socket);
+      socket.pipe(upstream);
+    });
+    upstream.on('error', () => socket.destroy());
+    socket.on('error', () => upstream.destroy());
+  });
+});
+await new Promise((r) => connectProxy.listen(0, '127.0.0.1', r));
+const PROXY = `127.0.0.1:${connectProxy.address().port}`; // 故意不带 scheme，测归一化
+
+// 始终拒绝 CONNECT 的代理（模拟无权限/规则拦截）
+const rejectProxy = net.createServer((socket) => {
+  socket.once('data', () => { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.end(); });
+});
+await new Promise((r) => rejectProxy.listen(0, '127.0.0.1', r));
+const REJECT_PROXY = `http://127.0.0.1:${rejectProxy.address().port}`;
+console.log(`mock CONNECT 代理: ${PROXY}（拒绝代理: ${REJECT_PROXY}）`);
 
 /* ---------------- 用不同 env 组合加载 server.js（不监听端口） ---------------- */
 function freshServer(env) {
@@ -108,13 +152,13 @@ const runTool = (srv, args) => srv.executeTool('everyinfra_data', args).then(
     EVERYINFRA_JOB_MAX_WAIT_MS: '15000',
   });
 
-  // E1 免 key 目录（列出平台 + 搜索工具）
+  // E1 免 key 目录（列出平台 + 搜索工具带必填参数）
   const e1 = await runTool(good, { kind: 'catalog' });
-  record('E1', 'catalog 免 key 目录（平台+搜索工具）', '含 xiaohongshu/douyin 与 web/scholar', e1.out.slice(0, 120), e1.ok && /xiaohongshu/.test(e1.out) && /douyin/.test(e1.out) && /web/.test(e1.out) && /scholar/.test(e1.out), '');
+  record('E1', 'catalog 免 key 目录（平台+搜索工具）', '含 xiaohongshu 与 web(q)/scholar(q)', e1.out.slice(0, 120), e1.ok && /xiaohongshu/.test(e1.out) && /douyin/.test(e1.out) && /web\(q\)/.test(e1.out) && /scholar\(q\)/.test(e1.out), '');
 
-  // E2 指定平台目录
+  // E2 指定平台目录：capabilities 紧凑渲染（动作/必填/可选/价格）
   const e2 = await runTool(good, { kind: 'catalog', platform: 'xiaohongshu' });
-  record('E2', 'catalog 指定平台（动作+计价）', '含 search/note 动作', e2.out.slice(0, 120), e2.ok && /search/.test(e2.out) && /note/.test(e2.out), '');
+  record('E2', 'catalog 指定平台（动作/必填参数/价格紧凑渲染）', '含 search、必填{keyword}、¥0.037', e2.out.slice(0, 160), e2.ok && /search/.test(e2.out) && /\{keyword\}/.test(e2.out) && /¥0\.037/.test(e2.out) && /note/.test(e2.out), '');
 
   // E3 不存在的平台 → 友好 404
   const e3 = await runTool(good, { kind: 'catalog', platform: 'nonexist' });
@@ -158,6 +202,44 @@ const runTool = (srv, args) => srv.executeTool('everyinfra_data', args).then(
   const d1 = await runTool(dead, { kind: 'catalog' });
   record('E10', '网络不可达 → 提示配 EVERYINFRA_PROXY', '错误含「网络请求失败」与代理指引', d1.out.slice(0, 150), !d1.ok && /网络请求失败/.test(d1.out) && /EVERYINFRA_PROXY/.test(d1.out), '');
 
+  /* -- 组合 E：内置 CONNECT 代理隧道（模拟 Clash，地址不带 scheme 测归一化） -- */
+  const proxied = freshServer({
+    EVERYINFRA_BASE_URL: MOCK,
+    EVERYINFRA_API_KEY: 'test-key',
+    EVERYINFRA_PROXY: PROXY,
+    EVERYINFRA_TIMEOUT_MS: '5000',
+    EVERYINFRA_JOB_MAX_WAIT_MS: '15000',
+  });
+  const connectsBefore = state.connects;
+  const socialBefore = state.socialBodies.length;
+
+  // P1 catalog 走代理（gzip + chunked 响应经隧道解压）
+  const p1 = await runTool(proxied, { kind: 'catalog' });
+  record('P1', 'catalog 走 CONNECT 代理（gzip/chunked 解压）', '含 xiaohongshu/web 且代理 CONNECT 次数增加', p1.out.slice(0, 120), p1.ok && /xiaohongshu/.test(p1.out) && /scholar/.test(p1.out) && state.connects > connectsBefore, `connects=${state.connects - connectsBefore}`);
+
+  // P2 social 走代理：鉴权头经隧道透传到目标
+  const p2 = await runTool(proxied, { kind: 'social', platform: 'xiaohongshu', action: 'search', params: { query: '代理' } });
+  const lastSocial = state.socialBodies[socialBefore] || {};
+  record('P2', 'social 走代理（Authorization 透传 + body 到达）', 'mock 收到 __auth=Bearer test-key 且 query=代理', p2.out.slice(0, 100), p2.ok && lastSocial.__auth === 'Bearer test-key' && lastSocial.params?.query === '代理' && /已保存/.test(p2.out), JSON.stringify(lastSocial).slice(0, 120));
+
+  /* -- 组合 F：代理拒绝 CONNECT → 友好报错 -- */
+  const rejected = freshServer({
+    EVERYINFRA_BASE_URL: MOCK,
+    EVERYINFRA_API_KEY: 'test-key',
+    EVERYINFRA_PROXY: REJECT_PROXY,
+  });
+  const f1 = await runTool(rejected, { kind: 'catalog' });
+  record('P3', '代理拒绝 CONNECT（403）→ 友好报错', '错误含「代理 CONNECT 被拒绝」', f1.out.slice(0, 120), !f1.ok && /代理 CONNECT 被拒绝/.test(f1.out), '');
+
+  // P4：代理端口无进程 → 友好报错
+  const deadProxy = freshServer({
+    EVERYINFRA_BASE_URL: MOCK,
+    EVERYINFRA_API_KEY: 'test-key',
+    EVERYINFRA_PROXY: 'http://127.0.0.1:1',
+  });
+  const p4 = await runTool(deadProxy, { kind: 'catalog' });
+  record('P4', '代理不可达 → 友好报错（提示检查端口）', '错误含「连接代理超时/失败」', p4.out.slice(0, 150), !p4.ok && /代理/.test(p4.out), '');
+
   /* ---------------- 收尾 ---------------- */
   failed = results.filter((r) => !r.pass).length;
   console.log('\n════════ everyinfra_check 汇总 ════════');
@@ -170,5 +252,7 @@ const runTool = (srv, args) => srv.executeTool('everyinfra_data', args).then(
     if (!fs.readdirSync(eiDir).length) fs.rmSync(eiDir, { recursive: true });
   }
   mockServer.close();
+  connectProxy.close();
+  rejectProxy.close();
   process.exit(failed ? 1 : 0);
 })().catch((e) => { console.error('测试脚本异常:', e); process.exit(2); });
