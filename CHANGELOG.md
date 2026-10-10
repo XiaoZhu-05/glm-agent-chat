@@ -2,6 +2,26 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号语义见 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.4.1] - 2026-10-10 —— 流式挂死与规划模式护栏
+
+### 修复
+
+- **GLM 流式响应空闲超时**（`GLM_STREAM_IDLE_TIMEOUT_MS`，默认 90s）：上游流中途挂死（网络/代理断流）时，
+  以前服务端 `for await` 无限等待、前端永远收不到收尾事件，界面表现为"文字输出一半后永久转圈"。
+  现在看门狗按空闲超时主动 abort，经既有路由兜底向前端发 `error` + `done` 事件，界面显示错误并可继续对话。
+- **规划模式执行漏洞**：此前模型在规划模式下违规发出的 `tool_calls` 会被照常执行（含 `everyinfra_data` 等付费工具），
+  违背"只规划、绝不执行"的模式契约；现一律忽略，仅返回模型正文。
+
+### 变更
+
+- 规划模式下发给 API 的历史消息过滤全部工具轮次（`toApiMessages` 新增 `stripToolTurns`）：
+  历史里的成功调用示范会诱导模型在本应只出计划的回合模仿调工具，是上述两类问题的常见诱因。
+
+### 开发
+
+- `DATA_DIR` 支持环境变量覆盖，单测可与真实会话存储隔离。
+- 验证脚本 `tests/agent_harness_check.mjs`（mock GLM SSE 服务，无需真实 key/外网）：聊天模式工具回归 / 规划模式守卫 / 历史过滤 / 挂死超时，7/7 通过；everyinfra 17/17、E2E 22/22 回归无退化。
+
 ## [0.4.0] - 2026-10-10 —— EveryInfra 数据平台接入（v0.4.0-everyinfra）
 
 ### 新增

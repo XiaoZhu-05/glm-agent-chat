@@ -66,6 +66,7 @@ node server.js          # 或 npm start
 | `GLM_MODELS` | `glm-5.3,glm-4.6,...` | 界面可切换的模型列表 |
 | `PORT` | `3210` | 服务端口 |
 | `GLM_VISION_MODELS` | `glm-4v-flash,glm-4.5v,glm-4.6v` | 支持图片输入的视觉模型 |
+| `GLM_STREAM_IDLE_TIMEOUT_MS` | `90000` | GLM 流式响应空闲超时：超过该时长无任何数据则断开并提示重试（防上游断流导致界面永久转圈） |
 | `IMAGE_MAX_BYTES` | `5242880` | 单张图片大小上限 |
 | `UPLOAD_MAX_BYTES` | `10485760` | 文档上传大小上限 |
 | `PDF_MAX_PAGES` | `30` | PDF 最大提取页数 |
