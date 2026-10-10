@@ -62,6 +62,12 @@ const CONFIG = {
   biomniPython: process.env.BIOMNI_PYTHON || '',
   biomniModel: process.env.BIOMNI_MODEL || 'glm-4.5-flash',
   biomniTimeoutMs: parseInt(process.env.BIOMNI_TIMEOUT_MS || '300000', 10),
+  // EveryInfra（数据采集/搜索平台 API）
+  everyinfraApiKey: process.env.EVERYINFRA_API_KEY || '',
+  everyinfraBaseUrl: (process.env.EVERYINFRA_BASE_URL || 'https://api.everyinfra.com').replace(/\/+$/, ''),
+  everyinfraTimeoutMs: parseInt(process.env.EVERYINFRA_TIMEOUT_MS || '30000', 10),
+  everyinfraJobMaxWaitMs: parseInt(process.env.EVERYINFRA_JOB_MAX_WAIT_MS || '120000', 10),
+  everyinfraProxy: process.env.EVERYINFRA_PROXY || '',
   maxSteps: parseInt(process.env.AGENT_MAX_STEPS || '8', 10),
   cmdTimeoutMs: parseInt(process.env.CMD_TIMEOUT_MS || '30000', 10),
   maxToolOutput: parseInt(process.env.MAX_TOOL_OUTPUT || '6000', 10),
@@ -221,6 +227,25 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'everyinfra_data',
+      description: '调用 EveryInfra 数据平台 API：① 采集 86+ 平台的公开数据（小红书/抖音/B站/知乎/微博/淘宝/TikTok/YouTube/Reddit 等，动作如 search/profile/note/comments/trending）；② 17 种联网搜索工具（web/news/scholar/semantic/crawl/read/crosscheck 等）。首次使用先用 kind=catalog 查平台与动作清单（免 key）；发起数据请求需在 .env 配置 EVERYINFRA_API_KEY。结果自动保存完整 JSON 到工作区 everyinfra/ 目录并返回预览，支持 next_page_token 翻页与异步任务轮询。',
+      parameters: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['catalog', 'social', 'search', 'job'], description: 'catalog=查平台/动作/搜索工具目录（免 key）；social=平台数据采集；search=搜索工具；job=查询异步任务结果' },
+          platform: { type: 'string', description: '平台名（kind=social 必填，如 xiaohongshu/douyin/bilibili/reddit；kind=catalog 可选，传入则返回该平台的动作与计价）' },
+          action: { type: 'string', description: '数据动作（kind=social 必填，如 search/profile/note/comments/trending，以 catalog 查询结果为准）' },
+          tool: { type: 'string', description: '搜索工具名（kind=search 必填，如 web/news/scholar/semantic/read/crawl）' },
+          job_id: { type: 'string', description: '异步任务 ID（kind=job 必填）' },
+          params: { type: 'object', description: '接口参数对象，如 {"query":"关键词"}；翻页时传 {"page_token":"上次响应的 next_page_token"}' },
+        },
+        required: ['kind'],
+      },
+    },
+  },
 ];
 
 function runCommand(command) {
@@ -261,6 +286,8 @@ async function executeTool(name, args) {
       return predictProteinStructure(args.sequence || '');
     case 'biomni_task':
       return runBiomniTask(String(args.task || ''));
+    case 'everyinfra_data':
+      return everyinfraData(args || {});
     default:
       throw new Error(`未知工具：${name}`);
   }
@@ -583,6 +610,163 @@ function runBiomniTask(task) {
     child.stdin.write(payload);
     child.stdin.end();
   });
+}
+
+/* ---------------------------- EveryInfra（数据平台 API） ---------------------------- */
+
+const EI_SLEEP = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 代理为可选能力：仅配置 EVERYINFRA_PROXY 时按需加载 undici（项目保持零依赖）
+let eiDispatcher = null;
+
+/** EveryInfra 统一请求：拼 URL/鉴权头/可选代理，返回 {status, ok, data} */
+async function eiFetch(pathname, { method = 'GET', body } = {}) {
+  const opts = {
+    method,
+    headers: {
+      Accept: 'application/json',
+      ...(CONFIG.everyinfraApiKey ? { Authorization: `Bearer ${CONFIG.everyinfraApiKey}` } : {}),
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  };
+  if (CONFIG.everyinfraProxy) {
+    if (!eiDispatcher) {
+      let undici;
+      try { undici = require('undici'); } catch {
+        throw new Error('已配置 EVERYINFRA_PROXY 但未安装 undici（代理是可选能力，项目默认零依赖）。请在项目根目录执行 npm install undici，或改用系统级代理后清空该配置。');
+      }
+      eiDispatcher = new undici.ProxyAgent(CONFIG.everyinfraProxy);
+    }
+    opts.dispatcher = eiDispatcher;
+  }
+  const res = await fetchWithTimeout(`${CONFIG.everyinfraBaseUrl}${pathname}`, opts, CONFIG.everyinfraTimeoutMs);
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text.slice(0, 500) }; }
+  return { status: res.status, ok: res.ok, data };
+}
+
+/** 网络层异常翻译成模型可读的中文提示（代理/超时/不可达） */
+function eiWrapNetworkError(e) {
+  if (/abort/i.test(e.name || '') || /fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|ECONNRESET|EAI_AGAIN/i.test(e.message || '')) {
+    return new Error(`EveryInfra 网络请求失败（${e.cause?.code || e.cause?.message || e.message}）。api.everyinfra.com 在部分网络环境下直连不通，可在 .env 配置 EVERYINFRA_PROXY=http://127.0.0.1:7890（本机代理端口）后重启服务；也可稍后重试。`);
+  }
+  return e;
+}
+
+async function eiRequest(pathname, init) {
+  try {
+    return await eiFetch(pathname, init);
+  } catch (e) {
+    throw eiWrapNetworkError(e);
+  }
+}
+
+/** 异步任务轮询：202 + job_id → 每 2s 查一次，直到完成/失败/超过等待上限 */
+async function eiWaitJob(jobId) {
+  const deadline = Date.now() + CONFIG.everyinfraJobMaxWaitMs;
+  let polled = 0;
+  while (Date.now() < deadline) {
+    await EI_SLEEP(2000);
+    const { data } = await eiRequest(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+    polled++;
+    const st = String(data?.status || '').toLowerCase();
+    if (st === 'completed' || st === 'succeeded' || st === 'done') return data?.result !== undefined ? data.result : data;
+    if (st === 'failed' || st === 'error') throw new Error(`EveryInfra 异步任务失败：${truncate(JSON.stringify(data?.error || data), 300)}`);
+  }
+  throw new Error(`EveryInfra 异步任务 ${jobId} 等待超时（>${CONFIG.everyinfraJobMaxWaitMs / 1000}s，已轮询 ${polled} 次）。任务可能仍在后台执行：稍后用 kind=job, job_id="${jobId}" 再查一次即可拿到结果。`);
+}
+
+/** 业务响应 → 落地：完整 JSON 存 workspace/everyinfra/，返回摘要 + 预览 + 翻页提示 */
+function eiSaveResult(tag, data) {
+  const json = JSON.stringify(data, null, 2);
+  const file = `everyinfra/${tag}_${Date.now()}.json`;
+  const fp = path.join(WORKSPACE_DIR, file);
+  fs.mkdirSync(path.dirname(fp), { recursive: true });
+  fs.writeFileSync(fp, json, 'utf8');
+  const pageToken = data && typeof data.next_page_token === 'string' && data.next_page_token
+    ? `\n- 分页：还有下一页，把 params.page_token 设为 "${data.next_page_token}" 再次调用可获取后续数据`
+    : '';
+  return `- 完整数据已保存：workspace/${file}（${json.length} 字符）\n- 结果预览：\n${truncate(json, 1500)}${pageToken}`;
+}
+
+/** HTTP 状态码 → 友好错误（鉴权/额度/限流/参数），成功则进入落地/异步流程 */
+async function eiHandle(tag, { status, data }) {
+  if (status === 202 && (data?.job_id || data?.jobId)) {
+    const jobId = data.job_id || data.jobId;
+    const result = await eiWaitJob(jobId);
+    return `请求已异步执行（job_id=${jobId}），任务已完成。\n` + eiSaveResult(`${tag}_job`, result);
+  }
+  if (status === 401 || status === 403) {
+    throw new Error(`EVERYINFRA_API_KEY 无效或未授权（HTTP ${status}）${status === 403 ? '，也可能是账户额度不足：请到 https://console.everyinfra.com 的 Billing 页兑换额度码或充值' : '，请检查 .env 中的 key（sk- 开头）'}`);
+  }
+  if (status === 402) throw new Error('EveryInfra 账户额度不足（HTTP 402）：请到 https://console.everyinfra.com 的 Billing 页兑换额度码或充值。');
+  if (status === 429) throw new Error('EveryInfra 限流（HTTP 429），请间隔几秒后重试。');
+  if (status === 404) throw new Error(`接口或参数不存在（HTTP 404）：${truncate(JSON.stringify(data), 200)}。可用 kind=catalog 核对平台/动作/工具名。`);
+  if (status >= 400) throw new Error(`EveryInfra 请求失败（HTTP ${status}）：${truncate(JSON.stringify(data), 300)}`);
+  return eiSaveResult(tag, data);
+}
+
+/** everyinfra_data 工具实现：catalog（免 key）/ social / search / job 四种请求 */
+async function everyinfraData(args) {
+  const kind = String(args.kind || '').trim().toLowerCase();
+  const params = args.params && typeof args.params === 'object' && !Array.isArray(args.params) ? args.params : {};
+  const needKey = () => {
+    if (!CONFIG.everyinfraApiKey) {
+      throw new Error('未配置 EVERYINFRA_API_KEY：请到 https://console.everyinfra.com 注册，在 Billing 页兑换额度码并创建 API key（sk- 开头），填入项目根目录 .env 的 EVERYINFRA_API_KEY= 后重启服务。查平台目录可用 kind=catalog（免 key）。');
+    }
+  };
+
+  if (kind === 'catalog') {
+    const platform = String(args.platform || '').trim().toLowerCase();
+    if (platform) {
+      const r = await eiRequest(`/api/v1/social/catalog?platform=${encodeURIComponent(platform)}`);
+      if (r.status === 404) throw new Error(`平台「${platform}」不存在。先用 kind=catalog（不带 platform）获取支持的完整平台列表。`);
+      if (!r.ok) throw new Error(`catalog 查询失败（HTTP ${r.status}）：${truncate(JSON.stringify(r.data), 200)}`);
+      return `平台「${platform}」的动作与参数（发起请求用 kind=social, platform=${platform}, action=<动作>）：\n${truncate(JSON.stringify(r.data, null, 2), CONFIG.maxToolOutput)}`;
+    }
+    const [c, t] = await Promise.all([
+      eiRequest('/api/v1/social/catalog'),
+      eiRequest('/api/v1/search/tools'),
+    ]);
+    if (!c.ok) throw new Error(`平台目录查询失败（HTTP ${c.status}）：${truncate(JSON.stringify(c.data), 200)}`);
+    const platforms = Array.isArray(c.data?.platforms) ? c.data.platforms : [];
+    const tools = Array.isArray(t.data?.tools) ? t.data.tools.map((x) => x.tool || x.name || x) : [];
+    return `EveryInfra 目录（免 key 查询）：\n- 数据平台（${platforms.length} 个）：${platforms.join(', ')}\n- 搜索工具（${tools.length} 个）：${tools.join(', ')}\n用 kind=catalog 加 platform=<名称> 查某平台的动作与计价；kind=social / kind=search 发起数据请求（需 key）。`;
+  }
+
+  if (kind === 'social') {
+    needKey();
+    const platform = String(args.platform || '').trim().toLowerCase();
+    const action = String(args.action || '').trim().toLowerCase();
+    if (!platform || !action) throw new Error('kind=social 需要 platform 与 action 参数（如 xiaohongshu + search）。不确定取值时先用 kind=catalog&platform=<平台名> 查询。');
+    const r = await eiRequest('/api/v1/social', { method: 'POST', body: { platform, action, params } });
+    return `EveryInfra social 请求成功（${platform}.${action}）。\n` + (await eiHandle(`${platform}_${action}`, r));
+  }
+
+  if (kind === 'search') {
+    needKey();
+    const tool = String(args.tool || '').trim().toLowerCase();
+    if (!tool) throw new Error('kind=search 需要 tool 参数（如 web/news/scholar/semantic/read）。完整列表用 kind=catalog 查询。');
+    const r = await eiRequest('/api/v1/search', { method: 'POST', body: { tool, params } });
+    return `EveryInfra search 请求成功（${tool}）。\n` + (await eiHandle(`search_${tool}`, r));
+  }
+
+  if (kind === 'job') {
+    needKey();
+    const jobId = String(args.job_id || args.jobId || '').trim();
+    if (!jobId) throw new Error('kind=job 需要 job_id 参数。');
+    const r = await eiRequest(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+    if (r.status >= 400) throw new Error(`任务查询失败（HTTP ${r.status}）：${truncate(JSON.stringify(r.data), 300)}`);
+    const st = String(r.data?.status || '').toLowerCase();
+    if (st && st !== 'completed' && st !== 'succeeded' && st !== 'done') {
+      return `任务 ${jobId} 状态：${st || '进行中'}（尚未完成）。稍后再查，或直接把该 job_id 告诉用户。\n${truncate(JSON.stringify(r.data), 800)}`;
+    }
+    return `任务 ${jobId} 已完成。\n` + eiSaveResult(`job_${String(jobId).slice(0, 16)}`, r.data?.result !== undefined ? r.data.result : r.data);
+  }
+
+  throw new Error(`未知 kind「${kind}」。支持：catalog（免 key 目录）/ social（平台数据）/ search（搜索工具）/ job（查异步任务）。`);
 }
 
 /* ---------------------------- GLM 流式调用 ---------------------------- */
@@ -1076,13 +1260,18 @@ const server = http.createServer(async (req, res) => {
   });
 });
 
-server.listen(CONFIG.port, () => {
-  console.log('┌──────────────────────────────────────────────');
-  console.log('│  GLM Agent Chat（DeepSeek-Harness 风格）已启动');
-  console.log(`│  地址      http://localhost:${CONFIG.port}`);
-  console.log(`│  模型      ${CONFIG.model}`);
-  console.log(`│  API       ${CONFIG.baseUrl}`);
-  console.log(`│  API Key   ${CONFIG.apiKey ? '已配置' : '⚠ 未配置（请创建 .env 填写 GLM_API_KEY）'}`);
-  console.log(`│  工作区    ${WORKSPACE_DIR}`);
-  console.log('└──────────────────────────────────────────────');
-});
+if (require.main === module) {
+  server.listen(CONFIG.port, () => {
+    console.log('┌──────────────────────────────────────────────');
+    console.log('│  GLM Agent Chat（DeepSeek-Harness 风格）已启动');
+    console.log(`│  地址      http://localhost:${CONFIG.port}`);
+    console.log(`│  模型      ${CONFIG.model}`);
+    console.log(`│  API       ${CONFIG.baseUrl}`);
+    console.log(`│  API Key   ${CONFIG.apiKey ? '已配置' : '⚠ 未配置（请创建 .env 填写 GLM_API_KEY）'}`);
+    console.log(`│  工作区    ${WORKSPACE_DIR}`);
+    console.log('└──────────────────────────────────────────────');
+  });
+}
+
+// 供 tests/ 单测引用（node server.js 直接运行时不会导出副作用）
+module.exports = { CONFIG, TOOLS, executeTool, everyinfraData, runAgent };
