@@ -13,14 +13,16 @@ GLM 开放平台（智谱 BigModel）的 OpenAI 兼容接口驱动 `glm` 系列�
 ## 🧪 运行测试
 
 ```bash
-python tests/fixtures_gen.py   # 生成测试夹具（需 pypdf/openpyxl/Pillow）
-node tests/e2e.mjs             # 全量 E2E（需服务已启动）
-ONLY=T6 node tests/e2e.mjs     # 只跑某一组（T1~T6）
+python tests/fixtures_gen.py        # 生成测试夹具（需 pypdf/openpyxl/Pillow）
+node tests/e2e.mjs                  # 全量 E2E（需服务已启动）
+ONLY=T6 node tests/e2e.mjs          # 只跑某一组（T1~T6）
+node tests/everyinfra_check.mjs     # everyinfra_data 工具自包含验证（本地 mock，无需服务/外网）
 ```
 
 ## ✨ 功能特性与验证状态
 
 > 2026-10-09 功能验证：E2E 22/22 通过（`tests/e2e.mjs`，真实 API：glm-4.5-flash / glm-4v-flash）
+> 2026-10-10 everyinfra_data：mock 全路径 12/12 通过 + E2E 22/22 回归无退化（真实调用待 EVERYINFRA_API_KEY 与网络）
 
 | 功能 | 说明 | 状态 |
 | --- | --- | --- |
@@ -34,6 +36,7 @@ ONLY=T6 node tests/e2e.mjs     # 只跑某一组（T1~T6）
 | 🌐 联网查询 | `web_search` 工具，DDG→Bing 降级，10s 超时，结果可溯源 | ✅ 已验证 |
 | 🧬 蛋白结构预测 | `protein_structure` 工具（NVIDIA BioNeMo ESMFold NIM 云端），PDB 自动落盘 | ✅ 已验证（降级路径；真实调用待 NVIDIA_API_KEY） |
 | 🧫 生物医学子 agent | `biomni_task` 工具（Stanford Biomni，独立 venv 子进程沙箱，跳过 11GB 数据湖） | ✅ 链路已验证（免费模型下任务可能超时降级） |
+| 🛰 数据平台接入 | `everyinfra_data` 工具（EveryInfra：86+ 平台采集 + 17 种搜索工具；目录免 key、异步任务轮询、分页、可选代理） | ✅ mock 12/12；真实调用待 key/网络 |
 | ❓ 需求澄清 | 模糊需求输出 2-4 个互斥选项（单选/多选/自定义），先问后做 | ✅ 已验证 |
 | 🗂 会话持久化 | 服务端 JSON 存储 | ✅ 已验证 |
 
@@ -74,6 +77,14 @@ node server.js          # 或 npm start
 | `BIOMNI_PYTHON` | （空） | Biomni 独立 venv 内 python 的绝对路径 |
 | `BIOMNI_MODEL` | `glm-4.5-flash` | Biomni 使用的模型（复用 GLM_API_KEY） |
 | `BIOMNI_TIMEOUT_MS` | `300000` | Biomni 单任务超时 |
+| `EVERYINFRA_API_KEY` | （空） | EveryInfra 数据平台 key（console 兑换额度码后创建，`sk-` 开头） |
+| `EVERYINFRA_BASE_URL` | `https://api.everyinfra.com` | API 地址（一般不用改） |
+| `EVERYINFRA_TIMEOUT_MS` | `30000` | 单次请求超时 |
+| `EVERYINFRA_JOB_MAX_WAIT_MS` | `120000` | 异步任务最长等待，超时后可 `kind=job` 续查 |
+| `EVERYINFRA_PROXY` | （空） | 可选代理（需 `npm install undici`），见下方 EveryInfra 章节 |
+| `AGENT_MAX_STEPS` | `8` | 单轮对话最大工具调用步数 |
+| `CMD_TIMEOUT_MS` | `30000` | 单条命令超时 |
+| `MAX_TOOL_OUTPUT` | `6000` | 工具输出最大字符数（超出截断） |
 
 ## 🧫 Biomni 集成（可选）
 
@@ -88,9 +99,33 @@ biomni-venv/Scripts/python -m pip install biomni pandas langchain_openai tqdm
 
 沙箱设计：子进程运行、cwd 锁定 `workspace/biomni`、跳过 11GB 数据湖、300s 超时由父进程终止。
 注意：Biomni 会执行 LLM 生成的代码，生产环境建议进一步容器化；免费 flash 模型下任务可能不收敛（会如实返回过程日志，主 Agent 会自动降级接管）。
-| `AGENT_MAX_STEPS` | `8` | 单轮对话最大工具调用步数 |
-| `CMD_TIMEOUT_MS` | `30000` | 单条命令超时 |
-| `MAX_TOOL_OUTPUT` | `6000` | 工具输出最大字符数（超出截断） |
+
+## 🛰 EveryInfra 数据平台接入（可选）
+
+`everyinfra_data` 工具接入 [EveryInfra](https://everyinfra.com)：86+ 平台的公开数据采集
+（小红书 / 抖音 / B站 / 知乎 / 微博 / 淘宝 / TikTok / YouTube / Reddit 等）与 17 种联网搜索工具
+（web / news / scholar / semantic / crawl / read / crosscheck 等）。
+
+| kind | 说明 | 是否需要 key |
+| --- | --- | --- |
+| `catalog` | 查平台列表 / 某平台的动作与计价 / 搜索工具列表 | 免 key |
+| `social` | 平台数据采集（`platform` + `action` + `params`） | 需要 |
+| `search` | 搜索工具（`tool` + `params`） | 需要 |
+| `job` | 查询异步任务结果（`job_id`，等待超时后续查） | 需要 |
+
+行为要点：完整 JSON 自动落盘 `workspace/everyinfra/`，工具输出返回摘要预览；
+响应含 `next_page_token` 时提示模型翻页；202 异步任务自动轮询（每 2s，默认上限 120s）；
+未配 key / key 无效 / 额度不足 / 限流 / 网络不可达均有面向用户的友好报错。
+
+开通步骤：
+
+1. 到 [console.everyinfra.com](https://console.everyinfra.com) 注册（邮箱 + 密码）
+2. Billing 页兑换额度码（关注官方 WeChat 获取，**24 小时内有效**）→ 创建 API key（`sk-` 开头）
+3. `.env` 中填 `EVERYINFRA_API_KEY=sk-...` 后重启服务
+
+> ⚠️ 网络说明：`api.everyinfra.com` 在部分网络环境（如境内直连）不通。若工具报
+> 「网络请求失败」，在 `.env` 配置 `EVERYINFRA_PROXY=http://127.0.0.1:<本机代理端口>`
+> 并执行一次 `npm install undici`（代理为可选能力，默认保持零依赖）后重启服务。
 
 > 模型可用性取决于账号余额/资源包：`glm-5.3` 等旗舰模型需要充值；
 > `glm-4.5-flash`、`glm-4-flash` 通常有免费额度，可用于体验完整功能（含思考链）。
