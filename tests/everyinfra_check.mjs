@@ -127,7 +127,11 @@ const REJECT_PROXY = `http://127.0.0.1:${rejectProxy.address().port}`;
 console.log(`mock CONNECT 代理: ${PROXY}（拒绝代理: ${REJECT_PROXY}）`);
 
 /* ---------------- 用不同 env 组合加载 server.js（不监听端口） ---------------- */
+const EI_ENV_KEYS = ['EVERYINFRA_API_KEY', 'EVERYINFRA_BASE_URL', 'EVERYINFRA_TIMEOUT_MS', 'EVERYINFRA_JOB_MAX_WAIT_MS', 'EVERYINFRA_PROXY'];
 function freshServer(env) {
+  // 全量置空再覆盖：与真实 .env（可能已含 key/代理）及上一实例完全隔离；
+  // 空字符串 falsy 且已 in process.env，loadEnv 不会用 .env 覆盖
+  for (const k of EI_ENV_KEYS) process.env[k] = '';
   for (const [k, v] of Object.entries(env)) process.env[k] = v;
   delete require.cache[SERVER_PATH];
   return require(SERVER_PATH); // require.main 守卫：不 listen
@@ -178,6 +182,10 @@ const runTool = (srv, args) => srv.executeTool('everyinfra_data', args).then(
   const t7 = Date.now();
   const e7 = await runTool(good, { kind: 'social', platform: 'bilibili', action: 'trending' });
   record('E7', '202 异步任务（job_id 轮询至完成，解包 result）', `含 job_e2e001/热榜第1条，轮询≈3 次（~6s）`, e7.out.slice(0, 120), e7.ok && /job_e2e001/.test(e7.out) && /热榜第1条/.test(e7.out) && state.jobPolls === 3, `耗时${((Date.now() - t7) / 1000).toFixed(0)}s`);
+
+  // E12 显式 mode=async：透传到请求体并走异步流程
+  const e12 = await runTool(good, { kind: 'social', platform: 'douyin', action: 'trending', mode: 'async' });
+  record('E12', 'mode=async 显式透传（body 含 mode 且走 202 流程）', 'mock 收到 mode=async，输出含 job_id', e12.out.slice(0, 100), e12.ok && state.socialBodies.at(-1)?.mode === 'async' && /job_e2e001/.test(e12.out), JSON.stringify(state.socialBodies.at(-1)).slice(0, 120));
 
   // E8 search 工具
   const e8 = await runTool(good, { kind: 'search', tool: 'web', params: { query: 'test' } });
