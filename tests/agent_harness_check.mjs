@@ -10,6 +10,7 @@
  *   H2 规划模式守卫：模型违规发出的 tool_calls 被忽略，绝不执行（不发出 tool_call 事件）
  *   H3 历史过滤：规划模式发给 API 的消息不含任何工具轮次，聊天模式保留（回归）
  *   H4 流式挂死：上游长时间无数据时按空闲超时中断，抛出用户可读错误（而非永久等待）
+ *   H6 自纠重试闭环：工具出错 → 错误原文回填给模型 → 换正确参数重试 → 正常收尾
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -54,6 +55,27 @@ const mock = http.createServer((req, res) => {
     }
 
     round += 1;
+    if (scenario === 'retry') {
+      // 模拟"先错后改"的自纠模型：第 1 轮读不存在的文件，第 2 轮换正确路径重试，第 3 轮收尾
+      if (round === 1) {
+        sse({ choices: [{ delta: { content: '我读一下那个文件。' } }] });
+        sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_r1', function: { name: 'read_file', arguments: '{"path":"no_such_file_xyz.txt"}' } }] } }] });
+        sse({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      }
+      if (round === 2) {
+        sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_r2', function: { name: 'read_file', arguments: '{"path":"about.md"}' } }] } }] });
+        sse({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      }
+      sse({ choices: [{ delta: { content: '读到了，自我纠正成功，任务完成。' } }] });
+      sse({ choices: [{ delta: {}, finish_reason: 'stop' }] });
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
+
     if (round === 1) {
       // 第一轮：正文 + 一个工具调用（list_dir，安全只读）
       sse({ choices: [{ delta: { content: '我先看一下目录。' } }] });
@@ -112,7 +134,7 @@ async function runAgentCollect(srv, conv, text, opts) {
 
 (async () => {
   let failed = 0;
-
+  try {
   /* -- H1/H3（聊天模式）：正常执行 + 历史工具轮次保留 -- */
   const chat = freshServer({ GLM_BASE_URL: MOCK, GLM_API_KEY: 'test-key' });
   scenario = 'normal'; round = 0; bodies.length = 0;
@@ -156,6 +178,20 @@ async function runAgentCollect(srv, conv, text, opts) {
     req2.tools === undefined && sys.includes('规划模式（当前生效）') && !hasToolRole && !hasAssistantToolCalls);
   record('H3c', '规划模式：单轮即止（不进入工具循环的第二轮请求）', 'bodies.length=1', `bodies.length=${bodies.length}`, bodies.length === 1);
 
+  /* -- H6：工具出错 → 错误回填给模型 → 自我纠正换正确参数重试 → 正常收尾 -- */
+  const retrySrv = freshServer({ GLM_BASE_URL: MOCK, GLM_API_KEY: 'test-key' });
+  scenario = 'retry'; round = 0; bodies.length = 0;
+  const conv6 = seedConversation();
+  const ev6 = await runAgentCollect(retrySrv, conv6, '看看 about.md', {});
+  const failedResult = ev6.find((e) => e.type === 'tool_result' && e.ok === false);
+  const okResults = ev6.filter((e) => e.type === 'tool_result' && e.ok === true);
+  const ev6Done = ev6.find((e) => e.type === 'done');
+  const req2msgs = (bodies[1] || {}).messages || [];
+  const sawErrorInContext = req2msgs.some((m) => m.role === 'tool' && /工具执行出错/.test(m.content || ''));
+  record('H6', '工具出错→错误原文回传→自纠重试→收尾', 'ok=false 结果存在；第 2 轮请求含错误原文；重试成功；done 含"任务完成"',
+    JSON.stringify({ failed: Boolean(failedResult), okCount: okResults.length, sawErrorInContext, done: ev6Done?.message?.content?.slice(0, 12) }),
+    Boolean(failedResult) && sawErrorInContext && okResults.length >= 1 && /任务完成/.test(ev6Done?.message?.content || ''));
+
   /* -- H4：上游流挂死 → 空闲超时中断 -- */
   const stalling = freshServer({ GLM_BASE_URL: MOCK, GLM_API_KEY: 'test-key', GLM_STREAM_IDLE_TIMEOUT_MS: '400' });
   scenario = 'stall'; bodies.length = 0;
@@ -177,13 +213,14 @@ async function runAgentCollect(srv, conv, text, opts) {
   record('H5', '会话存储写入临时 DATA_DIR', `存在 ${path.join(TMP_DATA, 'conversations.json')}`,
     fs.existsSync(path.join(TMP_DATA, 'conversations.json')) ? '已写入临时目录' : '未找到',
     fs.existsSync(path.join(TMP_DATA, 'conversations.json')));
+  } finally {
+    failed = results.filter((r) => !r.pass).length;
+    console.log(`\n结果：${results.length - failed}/${results.length} 通过${failed ? `，${failed} 失败` : ''}`);
 
-  failed = results.filter((r) => !r.pass).length;
-  console.log(`\n结果：${results.length - failed}/${results.length} 通过${failed ? `，${failed} 失败` : ''}`);
-
-  sockets.forEach((s) => { try { s.destroy(); } catch { /* 已关闭 */ } });
-  await new Promise((r) => mock.close(r));
-  fs.rmSync(TMP_DATA, { recursive: true, force: true });
+    sockets.forEach((s) => { try { s.destroy(); } catch { /* 已关闭 */ } });
+    await new Promise((r) => mock.close(r));
+    fs.rmSync(TMP_DATA, { recursive: true, force: true });
+  }
   process.exitCode = failed ? 1 : 0;
 })().catch((e) => {
   console.error('测试脚本异常:', e);

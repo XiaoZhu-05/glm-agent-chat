@@ -52,7 +52,8 @@ const mockServer = http.createServer((req, res) => {
     // 与真实 API 同构：platforms 恒为全量列表，capabilities 按 ?platform= 过滤
     const allPlatforms = ['xiaohongshu', 'douyin', 'bilibili', 'reddit'];
     const allCaps = [
-      { platform: 'xiaohongshu', action: 'search', action_label: '关键词搜索', required_params: ['keyword'], optional_params: ['page_token', 'sort'], mode: 'sync', cost_credits: 400, price_cny: 0.037258 },
+      // param_meanings.allowed_values 与真实 catalog 响应同构：允许值须透传到目录输出，防止模型猜值
+      { platform: 'xiaohongshu', action: 'search', action_label: '关键词搜索', required_params: ['keyword'], optional_params: ['page_token', 'content_type', 'date_range', 'sort'], mode: 'sync', cost_credits: 400, price_cny: 0.037258, param_meanings: { content_type: { description: '内容类型', allowed_values: ['all', 'image', 'video'] }, sort: { description: '排序', allowed_values: ['relevance', 'newest', 'most_liked', 'most_commented', 'most_collected'] } } },
       { platform: 'xiaohongshu', action: 'note', action_label: '笔记详情', required_params: ['url'], optional_params: [], mode: 'sync', cost_credits: 400, price_cny: 0.037258 },
       { platform: 'douyin', action: 'search', action_label: '关键词搜索', required_params: ['keyword'], optional_params: ['page_token'], mode: 'sync', cost_credits: 400, price_cny: 0.037258 },
     ];
@@ -70,6 +71,7 @@ const mockServer = http.createServer((req, res) => {
       const b = JSON.parse(body || '{}');
       state.socialBodies.push({ ...b, __auth: auth });
       if (auth !== 'Bearer test-key') return send(401, { error: 'invalid api key' });
+      if (b.params?.content_type === 'note') return send(422, { error: { code: 'invalid_value', message: "`content_type` must be one of: all, image, video (got 'note')", request_id: 'req_mock' } });
       if (b.action === 'trending') return send(202, { object: 'job', job_id: 'job_e2e001' });
       if (b.params?.page_token === 'pg2') return send(200, { data: [{ tag: '第二页' }], next_page_token: 'pg3' });
       return send(200, { data: [{ note_id: 'n1', title: '测试笔记' }], next_page_token: 'pg2' });
@@ -160,13 +162,17 @@ const runTool = (srv, args) => srv.executeTool('everyinfra_data', args).then(
   const e1 = await runTool(good, { kind: 'catalog' });
   record('E1', 'catalog 免 key 目录（平台+搜索工具）', '含 xiaohongshu 与 web(q)/scholar(q)', e1.out.slice(0, 120), e1.ok && /xiaohongshu/.test(e1.out) && /douyin/.test(e1.out) && /web\(q\)/.test(e1.out) && /scholar\(q\)/.test(e1.out), '');
 
-  // E2 指定平台目录：capabilities 紧凑渲染（动作/必填/可选/价格）
+  // E2 指定平台目录：capabilities 紧凑渲染（动作/必填/可选/价格 + 参数允许值）
   const e2 = await runTool(good, { kind: 'catalog', platform: 'xiaohongshu' });
-  record('E2', 'catalog 指定平台（动作/必填参数/价格紧凑渲染）', '含 search、必填{keyword}、¥0.037', e2.out.slice(0, 160), e2.ok && /search/.test(e2.out) && /\{keyword\}/.test(e2.out) && /¥0\.037/.test(e2.out) && /note/.test(e2.out), '');
+  record('E2', 'catalog 指定平台（动作/必填/允许值/价格渲染）', '含 search、{keyword}、content_type: all|image|video、¥0.037', e2.out.slice(0, 200), e2.ok && /search/.test(e2.out) && /\{keyword\}/.test(e2.out) && /content_type: all\|image\|video/.test(e2.out) && /sort: relevance\|/.test(e2.out) && /¥0\.037/.test(e2.out) && /note/.test(e2.out), '');
 
   // E3 不存在的平台 → 友好 404
   const e3 = await runTool(good, { kind: 'catalog', platform: 'nonexist' });
   record('E3', 'catalog 未知平台 → 友好报错', '错误含「不存在」+提示先查列表', e3.out.slice(0, 120), !e3.ok && /不存在/.test(e3.out), '');
+
+  // E13 422 参数值无效 → 中文提示 + 报错原文（含允许值）+ 重试指引
+  const e13 = await runTool(good, { kind: 'social', platform: 'xiaohongshu', action: 'search', params: { keyword: '防晒霜', content_type: 'note' } });
+  record('E13', 'social 422 参数值无效 → 中文提示+允许值+重试指引', '错误含「参数值无效」「must be one of」「重试」', e13.out.slice(0, 200), !e13.ok && /参数值无效/.test(e13.out) && /must be one of/.test(e13.out) && /重试/.test(e13.out) && /kind=catalog/.test(e13.out), '');
 
   // E5 social 同步：落盘 + 翻页提示
   const e5 = await runTool(good, { kind: 'social', platform: 'xiaohongshu', action: 'search', params: { query: '咖啡' } });
