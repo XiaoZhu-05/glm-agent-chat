@@ -67,7 +67,7 @@ const CONFIG = {
   // EveryInfra（数据采集/搜索平台 API）
   everyinfraApiKey: process.env.EVERYINFRA_API_KEY || '',
   everyinfraBaseUrl: (process.env.EVERYINFRA_BASE_URL || 'https://api.everyinfra.com').replace(/\/+$/, ''),
-  everyinfraTimeoutMs: parseInt(process.env.EVERYINFRA_TIMEOUT_MS || '30000', 10),
+  everyinfraTimeoutMs: parseInt(process.env.EVERYINFRA_TIMEOUT_MS || '120000', 10), // 官方同步窗口约 100s
   everyinfraJobMaxWaitMs: parseInt(process.env.EVERYINFRA_JOB_MAX_WAIT_MS || '120000', 10),
   everyinfraProxy: process.env.EVERYINFRA_PROXY || '',
   maxSteps: parseInt(process.env.AGENT_MAX_STEPS || '8', 10),
@@ -233,7 +233,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'everyinfra_data',
-      description: '调用 EveryInfra 数据平台 API：① 采集 86+ 平台的公开数据（小红书/抖音/B站/知乎/微博/淘宝/TikTok/YouTube/Reddit 等，动作如 search/profile/note/comments/trending）；② 17 种联网搜索工具（web/news/scholar/semantic/crawl/read/crosscheck 等）。首次使用先用 kind=catalog 查平台与动作清单（免 key）；发起数据请求需在 .env 配置 EVERYINFRA_API_KEY。结果自动保存完整 JSON 到工作区 everyinfra/ 目录并返回预览，支持 next_page_token 翻页与异步任务轮询。',
+      description: '调用 EveryInfra 数据平台 API：① 采集 90 个平台的公开数据（小红书/抖音/B站/知乎/微博/淘宝/TikTok/YouTube/Reddit 等，动作如 search/profile/note/comments/trending）；② 17 种联网搜索工具（web/news/scholar/semantic/crawl/read/crosscheck 等）。首次使用先用 kind=catalog 查平台与动作清单（免 key）；social/search 是付费调用（约 ¥0.005~0.04/次），仅在用户明确要求数据采集时使用，不要为试探而调用。结果自动保存完整 JSON 到工作区 everyinfra/ 目录并返回预览，支持 next_page_token 翻页与异步任务轮询。',
       parameters: {
         type: 'object',
         properties: {
@@ -242,6 +242,7 @@ const TOOLS = [
           action: { type: 'string', description: '数据动作（kind=social 必填，如 search/profile/note/comments/trending，以 catalog 查询结果为准）' },
           tool: { type: 'string', description: '搜索工具名（kind=search 必填，如 web/news/scholar/semantic/read/crawl）' },
           job_id: { type: 'string', description: '异步任务 ID（kind=job 必填）' },
+          mode: { type: 'string', enum: ['sync', 'async'], description: '执行模式（可选）：sync=同步等待结果（默认，慢任务可能接近 100s）；async=立即返回 job_id 后台执行，本工具自动轮询至完成' },
           params: { type: 'object', description: '接口参数对象，按 catalog 查询结果填写（如 social 搜索常为 {"keyword":"关键词"}、search 工具常为 {"q":"关键词"}）；翻页时传 {"page_token":"上次响应的 next_page_token"}' },
         },
         required: ['kind'],
@@ -852,15 +853,19 @@ async function everyinfraData(args) {
     const platform = String(args.platform || '').trim().toLowerCase();
     const action = String(args.action || '').trim().toLowerCase();
     if (!platform || !action) throw new Error('kind=social 需要 platform 与 action 参数（如 xiaohongshu + search）。不确定取值时先用 kind=catalog&platform=<平台名> 查询。');
-    const r = await eiRequest('/api/v1/social', { method: 'POST', body: { platform, action, params } });
-    return `EveryInfra social 请求成功（${platform}.${action}）。\n` + (await eiHandle(`${platform}_${action}`, r));
+    const body = { platform, action, params };
+    if (String(args.mode || '').toLowerCase() === 'async') body.mode = 'async';
+    const r = await eiRequest('/api/v1/social', { method: 'POST', body });
+    return `EveryInfra social 请求成功（${platform}.${action}${body.mode ? '，异步' : ''}）。\n` + (await eiHandle(`${platform}_${action}`, r));
   }
 
   if (kind === 'search') {
     needKey();
     const tool = String(args.tool || '').trim().toLowerCase();
     if (!tool) throw new Error('kind=search 需要 tool 参数（如 web/news/scholar/semantic/read）。完整列表用 kind=catalog 查询。');
-    const r = await eiRequest('/api/v1/search', { method: 'POST', body: { tool, params } });
+    const body = { tool, params };
+    if (String(args.mode || '').toLowerCase() === 'async') body.mode = 'async';
+    const r = await eiRequest('/api/v1/search', { method: 'POST', body });
     return `EveryInfra search 请求成功（${tool}）。\n` + (await eiHandle(`search_${tool}`, r));
   }
 
