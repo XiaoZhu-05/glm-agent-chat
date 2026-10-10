@@ -17,7 +17,8 @@ const { exec, execFile } = require('child_process');
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
-const DATA_DIR = path.join(ROOT, 'data');
+// DATA_DIR 可被环境变量覆盖，单测用它与会话存储隔离
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(ROOT, 'data');
 const STORE_FILE = path.join(DATA_DIR, 'conversations.json');
 const WORKSPACE_DIR = path.join(ROOT, 'workspace');
 
@@ -56,6 +57,9 @@ const CONFIG = {
   maxTokens: parseInt(process.env.GLM_MAX_TOKENS || '8192', 10),
   // 各模型 max_tokens 上限不同（如 glm-4v-flash 上限 1024），未列出的用全局默认
   maxTokensByModel: { 'glm-4v-flash': 1024 },
+  // GLM 流式响应空闲超时：超过该时长未收到任何 chunk 视为连接挂死，主动中断，
+  // 避免上游/API 代理中途断流导致服务端与前端互相等待、界面永久转圈
+  streamIdleTimeoutMs: parseInt(process.env.GLM_STREAM_IDLE_TIMEOUT_MS || '90000', 10),
   // BioNeMo（NVIDIA NIM 云端 ESMFold）
   nvidiaApiKey: process.env.NVIDIA_API_KEY || '',
   nimBaseUrl: (process.env.NIM_BASE_URL || 'https://health.api.nvidia.com/v1/biology/nvidia/esmfold').replace(/\/+$/, ''),
@@ -943,20 +947,17 @@ async function streamCompletion(messages, tools, model, onEvent) {
   };
   if (tools && tools.length) body.tools = tools;
 
-  const res = await fetch(`${CONFIG.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${CONFIG.apiKey}` },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    let msg = text;
-    try { msg = JSON.parse(text).error?.message || text; } catch {}
-    const err = new Error(`GLM API ${res.status}: ${msg}`);
-    err.status = res.status;
-    throw err;
-  }
+  // 空闲看门狗：每收到一个 chunk 刷新时间戳，超过 streamIdleTimeoutMs 无数据则 abort，
+  // for await 会抛错并在下方翻译成用户可读提示（runAgent 抛出后由路由发 error/done 事件收尾）
+  const controller = new AbortController();
+  let lastActiveAt = Date.now();
+  let idleFired = false;
+  const watchdog = setInterval(() => {
+    if (Date.now() - lastActiveAt >= CONFIG.streamIdleTimeoutMs) {
+      idleFired = true;
+      controller.abort();
+    }
+  }, Math.max(250, Math.min(1000, Math.floor(CONFIG.streamIdleTimeoutMs / 10))));
 
   const decoder = new TextDecoder();
   let buf = '';
@@ -965,39 +966,65 @@ async function streamCompletion(messages, tools, model, onEvent) {
   let finishReason = null;
   const toolCalls = {}; // index -> {id, name, argsStr}
 
-  for await (const chunk of res.body) {
-    buf += decoder.decode(chunk, { stream: true });
-    const lines = buf.split(/\r?\n/);
-    buf = lines.pop();
-    for (const line of lines) {
-      const s = line.trim();
-      if (!s.startsWith('data:')) continue;
-      const payload = s.slice(5).trim();
-      if (payload === '[DONE]') continue;
-      let json;
-      try { json = JSON.parse(payload); } catch { continue; }
-      if (json.error) throw new Error(`GLM API: ${json.error.message || JSON.stringify(json.error)}`);
-      const delta = json.choices?.[0]?.delta || {};
-      if (delta.reasoning_content) {
-        reasoning += delta.reasoning_content;
-        onEvent({ type: 'reasoning', delta: delta.reasoning_content });
-      }
-      if (delta.content) {
-        content += delta.content;
-        onEvent({ type: 'content', delta: delta.content });
-      }
-      if (Array.isArray(delta.tool_calls)) {
-        for (const tc of delta.tool_calls) {
-          const idx = tc.index ?? 0;
-          if (!toolCalls[idx]) toolCalls[idx] = { id: tc.id || '', name: '', argsStr: '' };
-          if (tc.id) toolCalls[idx].id = tc.id;
-          if (tc.function?.name) toolCalls[idx].name = tc.function.name;
-          if (tc.function?.arguments) toolCalls[idx].argsStr += tc.function.arguments;
-        }
-      }
-      if (json.choices?.[0]?.finish_reason) finishReason = json.choices[0].finish_reason;
-      if (json.usage) onEvent({ type: 'usage', usage: json.usage });
+  try {
+    const res = await fetch(`${CONFIG.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${CONFIG.apiKey}` },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      let msg = text;
+      try { msg = JSON.parse(text).error?.message || text; } catch {}
+      const err = new Error(`GLM API ${res.status}: ${msg}`);
+      err.status = res.status;
+      throw err;
     }
+
+    for await (const chunk of res.body) {
+      lastActiveAt = Date.now();
+      buf += decoder.decode(chunk, { stream: true });
+      const lines = buf.split(/\r?\n/);
+      buf = lines.pop();
+      for (const line of lines) {
+        const s = line.trim();
+        if (!s.startsWith('data:')) continue;
+        const payload = s.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        let json;
+        try { json = JSON.parse(payload); } catch { continue; }
+        if (json.error) throw new Error(`GLM API: ${json.error.message || JSON.stringify(json.error)}`);
+        const delta = json.choices?.[0]?.delta || {};
+        if (delta.reasoning_content) {
+          reasoning += delta.reasoning_content;
+          onEvent({ type: 'reasoning', delta: delta.reasoning_content });
+        }
+        if (delta.content) {
+          content += delta.content;
+          onEvent({ type: 'content', delta: delta.content });
+        }
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            if (!toolCalls[idx]) toolCalls[idx] = { id: tc.id || '', name: '', argsStr: '' };
+            if (tc.id) toolCalls[idx].id = tc.id;
+            if (tc.function?.name) toolCalls[idx].name = tc.function.name;
+            if (tc.function?.arguments) toolCalls[idx].argsStr += tc.function.arguments;
+          }
+        }
+        if (json.choices?.[0]?.finish_reason) finishReason = json.choices[0].finish_reason;
+        if (json.usage) onEvent({ type: 'usage', usage: json.usage });
+      }
+    }
+  } catch (e) {
+    if (idleFired) {
+      throw new Error(`GLM API 流式响应超过 ${Math.round(CONFIG.streamIdleTimeoutMs / 1000)} 秒未收到任何数据，已自动断开（疑似网络或代理中断）。请重试；若频繁出现请检查网络或代理设置。`);
+    }
+    throw e;
+  } finally {
+    clearInterval(watchdog);
   }
 
   const calls = Object.keys(toolCalls).sort((a, b) => a - b).map((k) => {
@@ -1012,8 +1039,9 @@ async function streamCompletion(messages, tools, model, onEvent) {
 
 /* ---------------------------- Agent 循环（harness 核心） ---------------------------- */
 
-/** 把存储中的会话消息转成 API 消息（去掉 reasoning，保留 tool_calls/tool 轮次；历史图片限流；超长截断） */
-function toApiMessages(convMessages, visionModel) {
+/** 把存储中的会话消息转成 API 消息（去掉 reasoning，保留 tool_calls/tool 轮次；历史图片限流；超长截断）。
+ *  stripToolTurns=true（规划模式）时去除全部工具轮次：历史里的调用示范会诱导模型在本应只出计划的回合模仿调工具 */
+function toApiMessages(convMessages, visionModel, stripToolTurns = false) {
   const out = [{ role: 'system', content: SYSTEM_PROMPT }];
 
   // 超长对话截断：保留首条 user（任务背景）+ 截断说明 + 最近 N 条
@@ -1058,8 +1086,7 @@ function toApiMessages(convMessages, visionModel) {
       }
     } else if (m.role === 'assistant') {
       const msg = { role: 'assistant', content: m.content || '' };
-      if (m.tool_calls?.length) {
-        msg.content = m.content || '';
+      if (!stripToolTurns && m.tool_calls?.length) {
         msg.tool_calls = m.tool_calls.map((c) => ({
           id: c.id,
           type: 'function',
@@ -1068,6 +1095,7 @@ function toApiMessages(convMessages, visionModel) {
       }
       out.push(msg);
     } else if (m.role === 'tool' && m.tool_call_id) {
+      if (stripToolTurns) return; // forEach 内 return 即 continue
       out.push({ role: 'tool', tool_call_id: m.tool_call_id, content: m.content });
     }
   });
@@ -1115,7 +1143,7 @@ async function runAgent(conv, userText, model, onEvent, isAborted, opts = {}) {
     conv.title = userText.replace(/\s+/g, ' ').slice(0, 24) || '新对话';
   }
 
-  const apiMessages = toApiMessages(conv.messages, CONFIG.visionModels.includes(model));
+  const apiMessages = toApiMessages(conv.messages, CONFIG.visionModels.includes(model), planMode);
   if (planMode) apiMessages[0].content += PLAN_PROMPT_SUFFIX;
   const activeTools = planMode ? [] : TOOLS;
 
@@ -1146,11 +1174,12 @@ async function runAgent(conv, userText, model, onEvent, isAborted, opts = {}) {
       ts: Date.now(),
     };
 
-    // 硬约束：模型在输出澄清选项（```options）的回合不应执行动作——
+    // 硬约束①：模型在输出澄清选项（```options）的回合不应执行动作——
     // 即使它同时发起了 tool_calls 也忽略，等用户选择后再执行
+    // 硬约束②：规划模式只出计划、绝不执行——模型违规发出的 tool_calls 一律忽略
     const wantsClarify = /```options/.test(r.content || '');
 
-    if (r.toolCalls.length && r.finishReason === 'tool_calls' && !wantsClarify) {
+    if (!planMode && r.toolCalls.length && r.finishReason === 'tool_calls' && !wantsClarify) {
       assistantMsg.tool_calls = r.toolCalls;
       conv.messages.push(assistantMsg);
       apiMessages.push({
