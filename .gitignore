@@ -15,3 +15,6 @@ Thumbs.db
 .idea/
 .vscode/
 .zcodeignore
+
+# 运行日志（重启脚本 stderr）
+server.err
