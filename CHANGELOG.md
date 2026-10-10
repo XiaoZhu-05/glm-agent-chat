@@ -7,7 +7,8 @@
 ### 新增
 
 - **`everyinfra_data` 工具**（[everyinfra.com](https://everyinfra.com) 数据平台 API）：
-  - 四种请求：`catalog`（平台/动作/搜索工具目录，**免 key**）、`social`（86+ 平台数据采集）、`search`（17 种搜索工具）、`job`（异步任务续查）；
+  - 四种请求：`catalog`（平台/动作/搜索工具目录，**免 key**）、`social`（90 平台数据采集）、`search`（17 种搜索工具）、`job`（异步任务续查）；
+  - `mode` 参数（sync/async）：社交采集同步窗口约 100s，慢任务可显式走异步（默认请求超时也提到 120s）；
   - 完整 JSON 自动落盘 `workspace/everyinfra/`，工具输出返回摘要预览 + `next_page_token` 翻页指引；
   - 202 异步任务自动轮询（每 2s，默认上限 120s，超时提示用 `kind=job` 续查，结果自动解包 `result` 字段）；
   - 友好报错全覆盖：未配 key（含 console 开通指引）/ 401 / 402 额度不足（提示兑换额度码）/ 404 / 429 / 网络不可达（提示配 `EVERYINFRA_PROXY`）；
@@ -17,8 +18,9 @@
 
 ### 已验证 / 未验证项（如实）
 
-- ✅ 已验证：mock 全路径 12/12（目录/404/未配 key/401/同步落盘+翻页/`page_token` 翻页/202 异步轮询/search 透传/注册表/网络不可达提示代理）+ 代理隧道单测（本地 CONNECT 代理：明文/压缩/鉴权透传）；E2E 回归 22/22 无退化；真实聊天链路中模型正确调用工具且被阻断网络下优雅降级（提示配代理）；真实 API 走本机代理调通 `catalog`（免 key）。
-- ⏸ 待验证：**真实 API 调用**——需 ① 用户在 [console.everyinfra.com](https://console.everyinfra.com) 兑换额度码（24h 有效）并创建 API key；② 本机网络可达 api.everyinfra.com 或配置 `EVERYINFRA_PROXY`。
+- ✅ 已验证：mock 全路径 17/17（目录/404/未配 key/401/同步落盘+翻页/`page_token` 翻页/202 异步轮询/mode=async 透传/search 透传/注册表/网络不可达提示代理 + 代理隧道单测：明文/gzip·chunked/鉴权透传/CONNECT 拒绝/代理不可达）；E2E 回归 22/22 无退化。
+- ✅ **真实 API 已调通**（走本机代理 + 内置 CONNECT 隧道）：`catalog` 免 key（90 平台/409 能力/17 工具）；`social` 付费采集（小红书热榜，异步模式 41s，含真实笔记数据与计费回执）；`search` 付费搜索（web 工具 2.3s，返回计费与余额）；聊天全链路中 glm-4.5-flash 自主调用并整理答案。
+- ⏸ 待观察：更多平台/动作的参数细节以 `kind=catalog` 实时查询为准；账号余额耗尽后的 402 路径仅 mock 验证过。
 
 ### 修复
 

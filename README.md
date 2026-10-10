@@ -22,7 +22,7 @@ node tests/everyinfra_check.mjs     # everyinfra_data 工具自包含验证（�
 ## ✨ 功能特性与验证状态
 
 > 2026-10-09 功能验证：E2E 22/22 通过（`tests/e2e.mjs`，真实 API：glm-4.5-flash / glm-4v-flash）
-> 2026-10-10 everyinfra_data：mock 全路径 12/12 通过 + E2E 22/22 回归无退化（真实调用待 EVERYINFRA_API_KEY 与网络）
+> 2026-10-10 everyinfra_data：自包含 mock 17/17 + E2E 22/22 回归；真实 API 全链路调通（catalog / 小红书热榜付费采集 / web 搜索，走内置 CONNECT 代理隧道）
 
 | 功能 | 说明 | 状态 |
 | --- | --- | --- |
@@ -36,7 +36,7 @@ node tests/everyinfra_check.mjs     # everyinfra_data 工具自包含验证（�
 | 🌐 联网查询 | `web_search` 工具，DDG→Bing 降级，10s 超时，结果可溯源 | ✅ 已验证 |
 | 🧬 蛋白结构预测 | `protein_structure` 工具（NVIDIA BioNeMo ESMFold NIM 云端），PDB 自动落盘 | ✅ 已验证（降级路径；真实调用待 NVIDIA_API_KEY） |
 | 🧫 生物医学子 agent | `biomni_task` 工具（Stanford Biomni，独立 venv 子进程沙箱，跳过 11GB 数据湖） | ✅ 链路已验证（免费模型下任务可能超时降级） |
-| 🛰 数据平台接入 | `everyinfra_data` 工具（EveryInfra：86+ 平台采集 + 17 种搜索工具；目录免 key、异步任务轮询、分页、可选代理） | ✅ mock 12/12；真实调用待 key/网络 |
+| 🛰 数据平台接入 | `everyinfra_data` 工具（EveryInfra：90 平台采集 + 17 种搜索工具；目录免 key、异步任务轮询、分页、内置代理隧道） | ✅ 已验证（真实付费调用通过） |
 | ❓ 需求澄清 | 模糊需求输出 2-4 个互斥选项（单选/多选/自定义），先问后做 | ✅ 已验证 |
 | 🗂 会话持久化 | 服务端 JSON 存储 | ✅ 已验证 |
 
@@ -79,7 +79,7 @@ node server.js          # 或 npm start
 | `BIOMNI_TIMEOUT_MS` | `300000` | Biomni 单任务超时 |
 | `EVERYINFRA_API_KEY` | （空） | EveryInfra 数据平台 key（console 兑换额度码后创建，`sk-` 开头） |
 | `EVERYINFRA_BASE_URL` | `https://api.everyinfra.com` | API 地址（一般不用改） |
-| `EVERYINFRA_TIMEOUT_MS` | `30000` | 单次请求超时 |
+| `EVERYINFRA_TIMEOUT_MS` | `120000` | 单次请求超时（官方同步窗口约 100s） |
 | `EVERYINFRA_JOB_MAX_WAIT_MS` | `120000` | 异步任务最长等待，超时后可 `kind=job` 续查 |
 | `EVERYINFRA_PROXY` | （空） | 可选代理（内置 CONNECT 隧道，零依赖），见下方 EveryInfra 章节 |
 | `AGENT_MAX_STEPS` | `8` | 单轮对话最大工具调用步数 |
@@ -102,7 +102,7 @@ biomni-venv/Scripts/python -m pip install biomni pandas langchain_openai tqdm
 
 ## 🛰 EveryInfra 数据平台接入（可选）
 
-`everyinfra_data` 工具接入 [EveryInfra](https://everyinfra.com)：86+ 平台的公开数据采集
+`everyinfra_data` 工具接入 [EveryInfra](https://everyinfra.com)：90 个平台的公开数据采集
 （小红书 / 抖音 / B站 / 知乎 / 微博 / 淘宝 / TikTok / YouTube / Reddit 等）与 17 种联网搜索工具
 （web / news / scholar / semantic / crawl / read / crosscheck 等）。
 
