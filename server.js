@@ -11,6 +11,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const tls = require('tls');
+const zlib = require('zlib');
 const { exec, execFile } = require('child_process');
 
 const ROOT = __dirname;
@@ -240,7 +242,7 @@ const TOOLS = [
           action: { type: 'string', description: '数据动作（kind=social 必填，如 search/profile/note/comments/trending，以 catalog 查询结果为准）' },
           tool: { type: 'string', description: '搜索工具名（kind=search 必填，如 web/news/scholar/semantic/read/crawl）' },
           job_id: { type: 'string', description: '异步任务 ID（kind=job 必填）' },
-          params: { type: 'object', description: '接口参数对象，如 {"query":"关键词"}；翻页时传 {"page_token":"上次响应的 next_page_token"}' },
+          params: { type: 'object', description: '接口参数对象，按 catalog 查询结果填写（如 social 搜索常为 {"keyword":"关键词"}、search 工具常为 {"q":"关键词"}）；翻页时传 {"page_token":"上次响应的 next_page_token"}' },
         },
         required: ['kind'],
       },
@@ -616,41 +618,137 @@ function runBiomniTask(task) {
 
 const EI_SLEEP = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// 代理为可选能力：仅配置 EVERYINFRA_PROXY 时按需加载 undici（项目保持零依赖）
-let eiDispatcher = null;
+/**
+ * 内置 HTTP 代理隧道（零依赖）：CONNECT 建立隧道后，https 目标再走 TLS，
+ * 手写 HTTP/1.1 请求/响应解析（含 chunked 与 gzip/deflate/br 解压）。
+ * 仅在配置 EVERYINFRA_PROXY 时启用；不依赖 undici 等第三方包。
+ */
+function eiNormalizeProxy(p) {
+  const s = String(p || '').trim();
+  if (!s) return null;
+  return new URL(/^[a-z]+:\/\//i.test(s) ? s : `http://${s}`);
+}
 
-/** EveryInfra 统一请求：拼 URL/鉴权头/可选代理，返回 {status, ok, data} */
-async function eiFetch(pathname, { method = 'GET', body } = {}) {
-  const opts = {
-    method,
-    headers: {
-      Accept: 'application/json',
-      ...(CONFIG.everyinfraApiKey ? { Authorization: `Bearer ${CONFIG.everyinfraApiKey}` } : {}),
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  };
-  if (CONFIG.everyinfraProxy) {
-    if (!eiDispatcher) {
-      let undici;
-      try { undici = require('undici'); } catch {
-        throw new Error('已配置 EVERYINFRA_PROXY 但未安装 undici（代理是可选能力，项目默认零依赖）。请在项目根目录执行 npm install undici，或改用系统级代理后清空该配置。');
-      }
-      eiDispatcher = new undici.ProxyAgent(CONFIG.everyinfraProxy);
-    }
-    opts.dispatcher = eiDispatcher;
+/** 解析代理隧道里的原始 HTTP 响应（状态行/头/chunked/压缩） */
+function eiParseHttpResponse(buf) {
+  const headerEnd = buf.indexOf('\r\n\r\n');
+  if (headerEnd < 0) throw new Error('代理隧道响应格式异常（未找到头部结束符）');
+  const head = buf.slice(0, headerEnd).toString('latin1');
+  const lines = head.split('\r\n');
+  const m = lines[0].match(/^HTTP\/1\.[01] (\d{3})(?: (.*))?$/);
+  if (!m) throw new Error(`代理隧道响应格式异常：${lines[0].slice(0, 60)}`);
+  const headers = {};
+  for (let i = 1; i < lines.length; i++) {
+    const idx = lines[i].indexOf(':');
+    if (idx > 0) headers[lines[i].slice(0, idx).trim().toLowerCase()] = lines[i].slice(idx + 1).trim();
   }
-  const res = await fetchWithTimeout(`${CONFIG.everyinfraBaseUrl}${pathname}`, opts, CONFIG.everyinfraTimeoutMs);
-  const text = await res.text();
+  let body = buf.slice(headerEnd + 4);
+  if ((headers['transfer-encoding'] || '').includes('chunked')) {
+    const out = [];
+    let pos = 0;
+    while (pos + 5 <= body.length) {
+      const lineEnd = body.indexOf('\r\n', pos);
+      if (lineEnd < 0) break;
+      const size = parseInt(body.slice(pos, lineEnd).toString('latin1').split(';')[0], 16);
+      if (!size) break; // 0 块 = 结束
+      out.push(body.slice(lineEnd + 2, lineEnd + 2 + size));
+      pos = lineEnd + 2 + size + 2;
+    }
+    body = Buffer.concat(out);
+  } else if (headers['content-length']) {
+    body = body.slice(0, +headers['content-length']);
+  }
+  const enc = headers['content-encoding'];
+  if (enc === 'gzip' || enc === 'x-gzip') body = zlib.gunzipSync(body);
+  else if (enc === 'deflate') body = zlib.inflateSync(body);
+  else if (enc === 'br') body = zlib.brotliDecompressSync(body);
+  return { status: +m[1], text: body.toString('utf8') };
+}
+
+/** 走代理发一次 HTTP 请求（CONNECT 隧道；https 目标 TLS，http 目标明文） */
+function eiProxyFetch(urlStr, { method = 'GET', headers = {}, body } = {}, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr);
+    const proxy = eiNormalizeProxy(CONFIG.everyinfraProxy);
+    const fail = (e) => { try { sockRef && sockRef.destroy(); } catch { /* 已关闭 */ } reject(e); };
+    let sockRef = null;
+    const connectReq = http.request({
+      host: proxy.hostname,
+      port: +proxy.port || 80,
+      method: 'CONNECT',
+      path: `${u.hostname}:${u.port || (u.protocol === 'https:' ? 443 : 80)}`,
+      headers: { Host: proxy.hostname },
+      timeout: timeoutMs,
+    });
+    connectReq.on('connect', (res, socket) => {
+      sockRef = socket;
+      if (res.statusCode !== 200) {
+        socket.destroy();
+        return fail(new Error(`代理 CONNECT 被拒绝（HTTP ${res.statusCode}），请检查 EVERYINFRA_PROXY 配置`));
+      }
+      const onTunnel = (sock) => {
+        sockRef = sock;
+        sock.setTimeout(timeoutMs, () => { sock.destroy(); fail(new Error(`代理隧道读取超时（>${timeoutMs / 1000}s）`)); });
+        const h = {
+          ...headers,
+          Host: u.hostname,
+          Connection: 'close', // 单次请求，读完即关，简化响应边界
+          'Accept-Encoding': 'gzip', // 让大响应可压缩，解压由 eiParseHttpResponse 处理
+        };
+        if (body !== undefined) h['Content-Length'] = Buffer.byteLength(body);
+        let raw = `${method} ${u.pathname}${u.search} HTTP/1.1\r\n`;
+        for (const [k, v] of Object.entries(h)) raw += `${k}: ${v}\r\n`;
+        sock.write(raw + '\r\n' + (body ?? ''));
+        const chunks = [];
+        sock.on('data', (c) => chunks.push(c));
+        sock.on('error', fail);
+        sock.on('close', () => {
+          if (!chunks.length) return fail(new Error('代理隧道响应为空'));
+          try { resolve(eiParseHttpResponse(Buffer.concat(chunks))); } catch (e) { fail(e); }
+        });
+      };
+      if (u.protocol === 'https:') {
+        const tlsSock = tls.connect({ socket, servername: u.hostname, timeout: timeoutMs }, () => onTunnel(tlsSock));
+        tlsSock.on('error', fail);
+      } else {
+        onTunnel(socket);
+      }
+    });
+    connectReq.on('error', fail);
+    connectReq.on('timeout', () => { connectReq.destroy(); fail(new Error(`连接代理超时（>${timeoutMs / 1000}s），请确认 EVERYINFRA_PROXY 端口在监听`)); });
+    connectReq.end();
+  });
+}
+
+/** EveryInfra 统一请求：拼 URL/鉴权头，配了 EVERYINFRA_PROXY 走内置隧道，否则直连；返回 {status, ok, data} */
+async function eiFetch(pathname, { method = 'GET', body } = {}) {
+  const url = `${CONFIG.everyinfraBaseUrl}${pathname}`;
+  const headers = {
+    Accept: 'application/json',
+    ...(CONFIG.everyinfraApiKey ? { Authorization: `Bearer ${CONFIG.everyinfraApiKey}` } : {}),
+    ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+  };
+  const payload = body !== undefined ? JSON.stringify(body) : undefined;
+  let status;
+  let text;
+  if (CONFIG.everyinfraProxy) {
+    const r = await eiProxyFetch(url, { method, headers, body: payload }, CONFIG.everyinfraTimeoutMs);
+    status = r.status;
+    text = r.text;
+  } else {
+    const res = await fetchWithTimeout(url, { method, headers, ...(payload !== undefined ? { body: payload } : {}) }, CONFIG.everyinfraTimeoutMs);
+    status = res.status;
+    text = await res.text();
+  }
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text.slice(0, 500) }; }
-  return { status: res.status, ok: res.ok, data };
+  return { status, ok: status >= 200 && status < 300, data };
 }
 
 /** 网络层异常翻译成模型可读的中文提示（代理/超时/不可达） */
 function eiWrapNetworkError(e) {
   if (/abort/i.test(e.name || '') || /fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|ECONNRESET|EAI_AGAIN/i.test(e.message || '')) {
-    return new Error(`EveryInfra 网络请求失败（${e.cause?.code || e.cause?.message || e.message}）。api.everyinfra.com 在部分网络环境下直连不通，可在 .env 配置 EVERYINFRA_PROXY=http://127.0.0.1:7890（本机代理端口）后重启服务；也可稍后重试。`);
+    return new Error(`EveryInfra 网络请求失败（${e.cause?.code || e.cause?.message || e.message}）。api.everyinfra.com 在部分网络环境下直连不通，可在 .env 配置 EVERYINFRA_PROXY=http://127.0.0.1:7897（本机代理端口，如 Clash Verge 7897 / Clash 7890 / v2rayN 10809）后重启服务；也可稍后重试。`);
   }
   return e;
 }
@@ -724,7 +822,15 @@ async function everyinfraData(args) {
       const r = await eiRequest(`/api/v1/social/catalog?platform=${encodeURIComponent(platform)}`);
       if (r.status === 404) throw new Error(`平台「${platform}」不存在。先用 kind=catalog（不带 platform）获取支持的完整平台列表。`);
       if (!r.ok) throw new Error(`catalog 查询失败（HTTP ${r.status}）：${truncate(JSON.stringify(r.data), 200)}`);
-      return `平台「${platform}」的动作与参数（发起请求用 kind=social, platform=${platform}, action=<动作>）：\n${truncate(JSON.stringify(r.data, null, 2), CONFIG.maxToolOutput)}`;
+      // 真实结构：{platforms:[全量名], capabilities:[{action,action_label,required_params,optional_params,mode,cost_credits,price_cny}]}
+      const caps = (r.data?.capabilities || []).filter((c) => String(c.platform || '').toLowerCase() === platform);
+      if (!caps.length) return `平台「${platform}」暂无能力目录（catalog 响应：${truncate(JSON.stringify(r.data), 800)}）`;
+      const lines = caps.map((c) => {
+        const req = (c.required_params || []).join(',');
+        const opt = (c.optional_params || []).filter((p) => p !== 'page_token').join(',');
+        return `- ${c.action}（${c.action_label || c.action}${c.mode === 'async' ? '，仅异步' : ''}）：params 必填 {${req}}${opt ? `，可选 {${opt}}` : ''}；¥${c.price_cny ?? '?'} /次`;
+      });
+      return `平台「${platform}」支持的动作（发起请求用 kind=social, platform=${platform}, action=<动作>，params 按下方必填/可选填写）：\n${lines.join('\n')}`;
     }
     const [c, t] = await Promise.all([
       eiRequest('/api/v1/social/catalog'),
@@ -732,8 +838,13 @@ async function everyinfraData(args) {
     ]);
     if (!c.ok) throw new Error(`平台目录查询失败（HTTP ${c.status}）：${truncate(JSON.stringify(c.data), 200)}`);
     const platforms = Array.isArray(c.data?.platforms) ? c.data.platforms : [];
-    const tools = Array.isArray(t.data?.tools) ? t.data.tools.map((x) => x.tool || x.name || x) : [];
-    return `EveryInfra 目录（免 key 查询）：\n- 数据平台（${platforms.length} 个）：${platforms.join(', ')}\n- 搜索工具（${tools.length} 个）：${tools.join(', ')}\n用 kind=catalog 加 platform=<名称> 查某平台的动作与计价；kind=social / kind=search 发起数据请求（需 key）。`;
+    const tools = Array.isArray(t.data?.tools) ? t.data.tools : [];
+    const toolLines = tools.map((x) => {
+      const name = x.tool || x.name || x;
+      const req = (x.required_params || []).join(',');
+      return `${name}${req ? `(${req})` : ''}`;
+    });
+    return `EveryInfra 目录（免 key 查询）：\n- 数据平台（${platforms.length} 个）：${platforms.join(', ')}\n- 搜索工具（${tools.length} 个，括号内为必填参数）：${toolLines.join(', ')}\n用 kind=catalog 加 platform=<名称> 查该平台的动作/参数/价格；kind=social / kind=search 发起数据请求（需 key）。`;
   }
 
   if (kind === 'social') {
