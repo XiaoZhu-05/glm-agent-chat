@@ -4,6 +4,17 @@
 
 ## [未发布] —— 步数上限收尾可见 + 前端连接看门狗
 
+### 新增
+
+- **EveryInfra 动作精准选择与步数优化**（真实案例：LinkedIn 搜"秦堃/zoonogen"返回 10 条无关帖文且任务烧满步数）：
+  - catalog 目录渲染附**参数语义**（`keyword=search 为帖子关键词，profile_search 为当前职位头衔`），无 allowed_values 的参数附语义摘要、有的附用途提示——模型不再靠动作名猜用途；
+  - `everyinfra_data` 工具描述新增**选动作指引**（找人→profile_search/person_profile、查公司→company_profile/employees、搜帖文才用 search），并明确"多数平台 search 搜的是内容不是人，查不到要如实说明，不要用无关结果充数"；
+  - 落盘预览从原始 JSON 截断改为**逐条一行摘要**（作者 | 正文 | 赞评数据，最多 10 条），模型一眼判断结果相关性，通常无需再花 2~4 步跑 python 解析；
+  - `run_command`/文档解析子进程注入 `PYTHONIOENCODING=utf-8` + `PYTHONUTF8=1`——Windows python 输出 GBK 乱码根治（此前乱码让 agent 误判脚本失败，连环重写 4 版脚本烧光步数）；
+  - 工具输出截断改**保头保尾**（头 75% + 尾 25% + 中段省略标记），统计结论在输出末尾不再丢失；
+  - 系统提示第 5 原则补充大 JSON 解析指引（用 run_command 跑 python 一步完成，不要 read_file 直读全文）。
+  - 验证：单测 22/22（新增 E11b/E14/E15/E16）；Windows python 中文输出实测无乱码；真实调用 `company_profile(zoonogen)` 返回干净空档案（如实"查无"）、`profile_search(秦堃)` 返回 5 个真实候选人档案（此前帖文搜索全部错过）。
+
 ### 修复
 
 - **步数上限停止说明前端不可见**：达到 `AGENT_MAX_STEPS` 上限后的收尾文字只随 `done` 事件发送，
