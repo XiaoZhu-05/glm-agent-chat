@@ -678,6 +678,14 @@
     setStreaming(true);
     state.abortCtrl = new AbortController();
 
+    // 看门狗：网络半开（Wi-Fi 切换/标签页冻结/隧道断开）会让 reader.read() 永远挂起、
+    // finally 不执行，界面停在"生成中"。超过 3 分钟收不到任何字节就主动断开恢复界面。
+    // 声明必须在 try 外：catch/finally 与 try 块是平级作用域，访问不到 try 内的变量
+    const WATCHDOG_MS = 180000;
+    let lastChunkAt = Date.now();
+    let watchdogFired = false;
+    let watchdog = null;
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -707,9 +715,18 @@
       const decoder = new TextDecoder();
       let buf = '';
 
+      watchdog = setInterval(() => {
+        if (Date.now() - lastChunkAt < WATCHDOG_MS) return;
+        watchdogFired = true;
+        clearInterval(watchdog);
+        state.abortCtrl.abort();
+        try { reader.cancel(); } catch { /* already closed */ }
+      }, 5000);
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        lastChunkAt = Date.now();
         buf += decoder.decode(value, { stream: true });
         const blocks = buf.split('\n\n');
         buf = blocks.pop();
@@ -725,13 +742,19 @@
         }
       }
     } catch (e) {
-      if (e.name !== 'AbortError') {
-        const box = document.createElement('div');
-        box.className = 'error-box';
-        box.textContent = '出错了：' + e.message;
-        turn.body.appendChild(box);
-      }
+        if (watchdogFired) {
+          const box = document.createElement('div');
+          box.className = 'error-box';
+          box.textContent = `连接中断（${Math.round(WATCHDOG_MS / 60000)} 分钟未收到任何响应，已自动断开）。服务端可能已完成生成：刷新对话查看，或直接让我继续。`;
+          turn.body.appendChild(box);
+        } else if (e.name !== 'AbortError') {
+          const box = document.createElement('div');
+          box.className = 'error-box';
+          box.textContent = '出错了：' + e.message;
+          turn.body.appendChild(box);
+        }
     } finally {
+      if (watchdog) clearInterval(watchdog);
       closeThink();
       if (answerDiv) {
         answerDiv.classList.remove('streaming');

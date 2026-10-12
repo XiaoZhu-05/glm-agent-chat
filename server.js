@@ -1228,11 +1228,14 @@ async function runAgent(conv, userText, model, onEvent, isAborted, opts = {}) {
     return;
   }
 
-  // 达到步数上限，礼貌收尾
+  // 达到步数上限，礼貌收尾。说明文字必须走 content 事件流式发出：
+  // 前端不渲染 done 事件的 message 内容，只发 done 的话用户看不到停止原因
+  const cutText = `（已达到单轮对话最大工具调用步数 ${CONFIG.maxSteps}，为避免循环消耗在此停止。可以让我继续，或换个说法再试。）`;
+  onEvent({ type: 'content', delta: cutText });
   const cut = {
     id: crypto.randomUUID(),
     role: 'assistant',
-    content: `（已达到单轮对话最大工具调用步数 ${CONFIG.maxSteps}，为避免循环消耗在此停止。可以让我继续，或换个说法再试。）`,
+    content: cutText,
     reasoning: '',
     tool_calls: [],
     ts: Date.now(),

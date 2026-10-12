@@ -11,6 +11,7 @@
  *   H3 历史过滤：规划模式发给 API 的消息不含任何工具轮次，聊天模式保留（回归）
  *   H4 流式挂死：上游长时间无数据时按空闲超时中断，抛出用户可读错误（而非永久等待）
  *   H6 自纠重试闭环：工具出错 → 错误原文回填给模型 → 换正确参数重试 → 正常收尾
+ *   H7 步数上限收尾：停止说明经 content 事件流式发出（前端不渲染 done 的 message 内容，只发 done 用户看不到原因）
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -76,6 +77,14 @@ const mock = http.createServer((req, res) => {
       return res.end();
     }
 
+    if (scenario === 'loop') {
+      // 每轮都要求调工具：模拟永不收尾的模型，用于触发步数上限收尾
+      sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_loop_' + round, function: { name: 'list_dir', arguments: '{"path":"."}' } }] } }] });
+      sse({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
+
     if (round === 1) {
       // 第一轮：正文 + 一个工具调用（list_dir，安全只读）
       sse({ choices: [{ delta: { content: '我先看一下目录。' } }] });
@@ -99,7 +108,7 @@ console.log(`mock GLM SSE: ${MOCK}`);
 /* ---------------- 隔离 env 加载 server.js ---------------- */
 
 const TMP_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-harness-data-'));
-const ENV_KEYS = ['GLM_API_KEY', 'GLM_BASE_URL', 'GLM_STREAM_IDLE_TIMEOUT_MS', 'DATA_DIR'];
+const ENV_KEYS = ['GLM_API_KEY', 'GLM_BASE_URL', 'GLM_STREAM_IDLE_TIMEOUT_MS', 'AGENT_MAX_STEPS', 'DATA_DIR'];
 function freshServer(env) {
   // 全量置空再覆盖：与真实 .env 及上一实例完全隔离（空字符串 falsy 且已在 env 中，loadEnv 不会覆盖）
   for (const k of ENV_KEYS) process.env[k] = '';
@@ -207,6 +216,18 @@ async function runAgentCollect(srv, conv, text, opts) {
   record('H4', '流式挂死：超时中断并抛出用户可读错误', '错误含"未收到任何数据"，且 ~0.4-5s 内返回',
     JSON.stringify({ msg: err4?.message, elapsed }),
     Boolean(err4) && /未收到任何数据/.test(err4.message) && elapsed < 5000);
+
+  /* -- H7：步数上限收尾——停止说明必须走 content 事件（前端不渲染 done.message 的内容） -- */
+  const loopSrv = freshServer({ GLM_BASE_URL: MOCK, GLM_API_KEY: 'test-key', AGENT_MAX_STEPS: '2' });
+  scenario = 'loop'; round = 0; bodies.length = 0;
+  const conv7 = seedConversation();
+  const ev7 = await runAgentCollect(loopSrv, conv7, '不停地列目录', {});
+  const cutStreamed = ev7.filter((e) => e.type === 'content').map((e) => e.delta).join('');
+  const ev7Done = ev7.find((e) => e.type === 'done');
+  record('H7', '步数上限：cut 文本经 content 事件流式发出且 done 可见',
+    'content 拼接含"已达到单轮对话最大工具调用步数 2"；done.message 同文本',
+    JSON.stringify({ cut: cutStreamed.slice(0, 30), done: ev7Done?.message?.content?.slice(0, 30) }),
+    /已达到单轮对话最大工具调用步数 2/.test(cutStreamed) && /已达到/.test(ev7Done?.message?.content || ''));
 
   /* -- 附加：DATA_DIR 隔离生效（会话写进临时目录，不碰真实 data/） -- */
   await new Promise((r) => setTimeout(r, 300)); // store.save 有 200ms 防抖
