@@ -16,5 +16,6 @@ Thumbs.db
 .vscode/
 .zcodeignore
 
-# 运行日志（重启脚本 stderr）
+# 运行日志（重启脚本 stdout/stderr）
+server.out
 server.err
