@@ -130,7 +130,11 @@ function safeResolve(p) {
 
 function truncate(s, n) {
   s = String(s ?? '');
-  return s.length > n ? s.slice(0, n) + `\n...[输出已截断，共 ${s.length} 字符]` : s;
+  if (s.length <= n) return s;
+  // 保头保尾：命令输出/JSON 的统计结论常在末尾，只留头会让模型误判"执行失败"而重试
+  const tail = Math.min(1500, Math.floor(n / 4));
+  const head = n - tail;
+  return s.slice(0, head) + `\n...[中段已省略，原输出共 ${s.length} 字符，保留头 ${head} + 尾 ${tail}]...\n` + s.slice(s.length - tail);
 }
 
 const TOOLS = [
@@ -237,7 +241,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'everyinfra_data',
-      description: '调用 EveryInfra 数据平台 API：① 采集 90 个平台的公开数据（小红书/抖音/B站/知乎/微博/淘宝/TikTok/YouTube/Reddit 等，动作如 search/profile/note/comments/trending）；② 17 种联网搜索工具（web/news/scholar/semantic/crawl/read/crosscheck 等）。首次使用先用 kind=catalog 查平台与动作清单（免 key）；social/search 是付费调用（约 ¥0.005~0.04/次），仅在用户明确要求数据采集时使用，不要为试探而调用。参数只能填 catalog 列出的允许值（「参数名: 值1|值2」格式），拿不准就不填；被 422 拒绝时按报错中的允许值修正参数后立即重试，不要放弃。结果自动保存完整 JSON 到工作区 everyinfra/ 目录并返回预览，支持 next_page_token 翻页与异步任务轮询。',
+      description: '调用 EveryInfra 数据平台 API：① 采集 90 个平台的公开数据（小红书/抖音/B站/知乎/微博/淘宝/TikTok/YouTube/Reddit 等）；② 17 种联网搜索工具（web/news/scholar/semantic/crawl/read/crosscheck 等）。**先按目标选对动作，再发起调用**：找某人的资料→profile_search/person_profile；查某公司→company_profile/employees；搜帖文/笔记内容才用 search；查某条内容的评论→comments；搜职位→jobs——各平台动作不同，首次使用先 kind=catalog 查清单（免 key，会标注每个动作与参数的用途）。注意：多数平台的 search 搜的是"内容"不是"人"，拿人名/公司名去 search 往往返回无关内容；确实查不到时如实说明该平台的数据机制，不要用无关结果充数。social/search 是付费调用（约 ¥0.005~0.04/次），仅在用户明确要求数据采集时使用，不要为试探而调用。参数只能填 catalog 列出的允许值（「参数名: 值1|值2」格式），拿不准就不填；被 422 拒绝时按报错中的允许值修正参数后立即重试，不要放弃。结果自动保存完整 JSON 到工作区 everyinfra/ 目录并返回逐条摘要预览，通常无需再解析文件；支持 next_page_token 翻页与异步任务轮询。',
       parameters: {
         type: 'object',
         properties: {
@@ -255,9 +259,13 @@ const TOOLS = [
   },
 ];
 
+// 子进程强制 UTF-8 输出：Windows 上 python 默认 GBK，中文回传变乱码，
+// agent 会误判为脚本错误而反复重写重跑（真实案例：LinkedIn 任务连环 4 版脚本烧光步数）
+const CHILD_ENV = { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' };
+
 function runCommand(command) {
   return new Promise((resolve) => {
-    exec(command, { cwd: WORKSPACE_DIR, timeout: CONFIG.cmdTimeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+    exec(command, { cwd: WORKSPACE_DIR, timeout: CONFIG.cmdTimeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: CHILD_ENV }, (err, stdout, stderr) => {
       let out = '';
       if (stdout) out += String(stdout);
       if (stderr) out += (out ? '\n[stderr]\n' : '') + String(stderr);
@@ -308,7 +316,7 @@ const FASTA_EXT = ['.fasta', '.fa', '.fas'];
 
 function runPython(script, args) {
   return new Promise((resolve) => {
-    execFile(CONFIG.pythonBin, [script, ...args], { timeout: 30000, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+    execFile(CONFIG.pythonBin, [script, ...args], { timeout: 30000, maxBuffer: 16 * 1024 * 1024, windowsHide: true, env: CHILD_ENV }, (err, stdout, stderr) => {
       if (err) {
         const hint = /ENOENT|not found|无法找到/i.test(String(err.message))
           ? '（未找到 Python，请安装 Python 或在 .env 中配置 PYTHON_BIN）'
@@ -781,6 +789,37 @@ async function eiWaitJob(jobId) {
   throw new Error(`EveryInfra 异步任务 ${jobId} 等待超时（>${CONFIG.everyinfraJobMaxWaitMs / 1000}s，已轮询 ${polled} 次）。任务可能仍在后台执行：稍后用 kind=job, job_id="${jobId}" 再查一次即可拿到结果。`);
 }
 
+/** results 数组 → 逐条一行摘要（作者 | 正文 | 互动数据）。让模型一眼判断结果相关性，无需再花步数跑 python 解析 */
+function eiSummarizeResults(data) {
+  if (!data || typeof data !== 'object') return null;
+  const items = Array.isArray(data.results) ? data.results : (Array.isArray(data.items) ? data.items : (Array.isArray(data.data) ? data.data : null));
+  if (!items || !items.length) return null;
+  const pick = (it, keys) => {
+    for (const k of keys) {
+      const v = it?.[k];
+      if (typeof v === 'string' && v.trim()) return v;
+    }
+    return '';
+  };
+  const lines = [];
+  for (const it of items.slice(0, 10)) {
+    if (it && typeof it === 'object') {
+      const author = pick(it, ['author_name', 'author', 'nickname', 'name', 'company', 'username', 'author_username']) || '?';
+      const body = String(pick(it, ['title', 'text', 'content', 'desc', 'description', 'summary', 'snippet', 'headline', 'bio'])).replace(/\s+/g, ' ').trim();
+      const stats = [
+        ['like_count', '赞'], ['comment_count', '评'], ['follower_count', '粉丝'],
+        ['connection_count', '人脉'], ['employee_count', '员工'], ['view_count', '浏览'],
+      ].map(([k, label]) => (typeof it[k] === 'number' ? `${label}${it[k]}` : '')).filter(Boolean).join(' ');
+      const url = pick(it, ['url', 'link']);
+      lines.push(`  ${lines.length + 1}. ${author} | ${body.slice(0, 80)}${body.length > 80 ? '…' : ''}${stats ? ` | ${stats}` : ''}${url ? ` | ${url}` : ''}`);
+    } else {
+      lines.push(`  ${lines.length + 1}. ${String(it).replace(/\s+/g, ' ').slice(0, 100)}`);
+    }
+  }
+  const total = typeof data.count === 'number' ? data.count : items.length;
+  return `- 结果摘要：共 ${total} 条${items.length > 10 ? `（列前 10 条，完整数据在下方文件）` : ''}：\n${lines.join('\n')}`;
+}
+
 /** 业务响应 → 落地：完整 JSON 存 workspace/everyinfra/，返回摘要 + 预览 + 翻页提示 */
 function eiSaveResult(tag, data) {
   const json = JSON.stringify(data, null, 2);
@@ -791,7 +830,9 @@ function eiSaveResult(tag, data) {
   const pageToken = data && typeof data.next_page_token === 'string' && data.next_page_token
     ? `\n- 分页：还有下一页，把 params.page_token 设为 "${data.next_page_token}" 再次调用可获取后续数据`
     : '';
-  return `- 完整数据已保存：workspace/${file}（${json.length} 字符）\n- 结果预览：\n${truncate(json, 1500)}${pageToken}`;
+  const summary = eiSummarizeResults(data);
+  const preview = summary || `结果预览（原始 JSON）：\n${truncate(json, 1500)}`;
+  return `- 完整数据已保存：workspace/${file}（${json.length} 字符）\n${preview}${pageToken}`;
 }
 
 /** HTTP 状态码 → 友好错误（鉴权/额度/限流/参数），成功则进入落地/异步流程 */
@@ -834,10 +875,23 @@ async function everyinfraData(args) {
       // 真实结构：{platforms:[全量名], capabilities:[{action,action_label,required_params,optional_params,mode,cost_credits,price_cny,param_meanings:{参数:{allowed_values:[...]}}}]}
       const caps = (r.data?.capabilities || []).filter((c) => String(c.platform || '').toLowerCase() === platform);
       if (!caps.length) return `平台「${platform}」暂无能力目录（catalog 响应：${truncate(JSON.stringify(r.data), 800)}）`;
-      // 参数名后附允许值（param_meanings.allowed_values）：模型只能从列出的值里选，杜绝靠猜导致的 422
+      // 参数名后附允许值与语义摘要（param_meanings）：模型只能从列出的值里选，且知道每个参数/动作到底搜什么——
+      // 杜绝靠猜导致 422 与选错动作（真实案例：想找人的资料却用 search 帖文搜索，返回 10 条无关帖文）
       const fmtParams = (names, meanings) => names.map((p) => {
-        const av = meanings?.[p]?.allowed_values;
-        return Array.isArray(av) && av.length ? `${p}: ${av.join('|')}` : p;
+        const m = meanings?.[p] || {};
+        const rawDesc = typeof m.description === 'string' ? m.description.trim() : '';
+        const av = Array.isArray(m.allowed_values) ? m.allowed_values : null;
+        if (av && av.length) {
+          const hint = rawDesc.split(/[：:]/)[0].slice(0, 20);
+          return `${p}${hint && hint !== rawDesc ? `（${hint}）` : ''}: ${av.join('|')}`;
+        }
+        const parts = rawDesc.split(/[。；;]/)[0].split(/[，,]/);
+        let desc = '';
+        for (const part of parts) {
+          if ((desc + (desc ? '，' : '') + part).length > 42) break;
+          desc = desc ? desc + '，' + part : part;
+        }
+        return desc ? `${p}=${desc}` : p;
       }).join(',');
       const lines = caps.map((c) => {
         const req = fmtParams(c.required_params || [], c.param_meanings);
@@ -911,7 +965,7 @@ const SYSTEM_PROMPT = `你是一个运行在用户电脑上的智能 Agent（类
 2. 涉及文件、命令、代码验证、数据处理等实际操作时，先思考计划，再调用工具，并根据工具结果继续或总结。
 3. 用户消息可能附带 [附件 ...] 块（PDF/Excel/FASTA/文本的提取内容）：优先依据附件内容回答；若提取内容被截断或需要更多细节，可用 read_file 读取附件的完整原始文件（附件块中给出了工作区路径）。图片附件会直接出现在消息里，用视觉能力理解它。
 4. 工具执行出错时必须自我纠正，禁止空回复结束：错误信息通常写明原因和允许取值，读懂后修正参数，在下一轮立即重试（同一处错误最多重试 2 次）；确实无法修复才向用户说明原因与建议。
-5. 工具输出可能被截断，注意甄别。
+5. 工具输出可能被截断，注意甄别（超长输出已自动保留首尾、中段省略；统计数据在末尾也不会丢）。分析工作区里的大 JSON 文件（如 everyinfra/ 落盘结果）时，直接用 run_command 跑 python 一步完成读取与统计，不要 read_file 直读全文占满上下文。
 6. 默认使用中文回答。回答使用 Markdown 格式，代码用代码块包裹。
 
 【需求不明确时必须澄清】

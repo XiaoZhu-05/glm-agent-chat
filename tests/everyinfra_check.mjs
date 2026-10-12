@@ -53,7 +53,7 @@ const mockServer = http.createServer((req, res) => {
     const allPlatforms = ['xiaohongshu', 'douyin', 'bilibili', 'reddit'];
     const allCaps = [
       // param_meanings.allowed_values 与真实 catalog 响应同构：允许值须透传到目录输出，防止模型猜值
-      { platform: 'xiaohongshu', action: 'search', action_label: '关键词搜索', required_params: ['keyword'], optional_params: ['page_token', 'content_type', 'date_range', 'sort'], mode: 'sync', cost_credits: 400, price_cny: 0.037258, param_meanings: { content_type: { description: '内容类型', allowed_values: ['all', 'image', 'video'] }, sort: { description: '排序', allowed_values: ['relevance', 'newest', 'most_liked', 'most_commented', 'most_collected'] } } },
+      { platform: 'xiaohongshu', action: 'search', action_label: '关键词搜索', required_params: ['keyword'], optional_params: ['page_token', 'content_type', 'date_range', 'sort'], mode: 'sync', cost_credits: 400, price_cny: 0.037258, param_meanings: { keyword: { description: 'search 为帖子关键词，profile_search 为当前职位头衔。搜人并不等同于按人物姓名或邮箱精确查询。' }, content_type: { description: '内容类型', allowed_values: ['all', 'image', 'video'] }, date_range: { description: '内容时间窗：no_filter 不限、past_week 最近 1 周', allowed_values: ['no_filter', 'past_week'] }, sort: { description: '排序', allowed_values: ['relevance', 'newest', 'most_liked', 'most_commented', 'most_collected'] } } },
       { platform: 'xiaohongshu', action: 'note', action_label: '笔记详情', required_params: ['url'], optional_params: [], mode: 'sync', cost_credits: 400, price_cny: 0.037258 },
       { platform: 'douyin', action: 'search', action_label: '关键词搜索', required_params: ['keyword'], optional_params: ['page_token'], mode: 'sync', cost_credits: 400, price_cny: 0.037258 },
     ];
@@ -73,8 +73,8 @@ const mockServer = http.createServer((req, res) => {
       if (auth !== 'Bearer test-key') return send(401, { error: 'invalid api key' });
       if (b.params?.content_type === 'note') return send(422, { error: { code: 'invalid_value', message: "`content_type` must be one of: all, image, video (got 'note')", request_id: 'req_mock' } });
       if (b.action === 'trending') return send(202, { object: 'job', job_id: 'job_e2e001' });
-      if (b.params?.page_token === 'pg2') return send(200, { data: [{ tag: '第二页' }], next_page_token: 'pg3' });
-      return send(200, { data: [{ note_id: 'n1', title: '测试笔记' }], next_page_token: 'pg2' });
+      if (b.params?.page_token === 'pg2') return send(200, { data: [{ title: '第二页' }], next_page_token: 'pg3' });
+      return send(200, { data: [{ note_id: 'n1', title: '测试笔记', author_name: '小红书用户A', text: '这是笔记正文内容', like_count: 42, comment_count: 7 }], next_page_token: 'pg2' });
     });
     return;
   }
@@ -92,7 +92,7 @@ const mockServer = http.createServer((req, res) => {
   if (req.method === 'GET' && url.pathname === '/api/v1/jobs/job_e2e001') {
     state.jobPolls++;
     if (state.jobPolls < 3) return send(200, { object: 'job', status: 'running' });
-    return send(200, { object: 'job', status: 'completed', result: { data: [{ hot: '热榜第1条' }] } });
+    return send(200, { object: 'job', status: 'completed', result: { data: [{ title: '热榜第1条' }] } });
   }
   send(404, { error: 'not mocked' });
 });
@@ -129,7 +129,7 @@ const REJECT_PROXY = `http://127.0.0.1:${rejectProxy.address().port}`;
 console.log(`mock CONNECT 代理: ${PROXY}（拒绝代理: ${REJECT_PROXY}）`);
 
 /* ---------------- 用不同 env 组合加载 server.js（不监听端口） ---------------- */
-const EI_ENV_KEYS = ['EVERYINFRA_API_KEY', 'EVERYINFRA_BASE_URL', 'EVERYINFRA_TIMEOUT_MS', 'EVERYINFRA_JOB_MAX_WAIT_MS', 'EVERYINFRA_PROXY'];
+const EI_ENV_KEYS = ['EVERYINFRA_API_KEY', 'EVERYINFRA_BASE_URL', 'EVERYINFRA_TIMEOUT_MS', 'EVERYINFRA_JOB_MAX_WAIT_MS', 'EVERYINFRA_PROXY', 'MAX_TOOL_OUTPUT'];
 function freshServer(env) {
   // 全量置空再覆盖：与真实 .env（可能已含 key/代理）及上一实例完全隔离；
   // 空字符串 falsy 且已 in process.env，loadEnv 不会用 .env 覆盖
@@ -162,9 +162,12 @@ const runTool = (srv, args) => srv.executeTool('everyinfra_data', args).then(
   const e1 = await runTool(good, { kind: 'catalog' });
   record('E1', 'catalog 免 key 目录（平台+搜索工具）', '含 xiaohongshu 与 web(q)/scholar(q)', e1.out.slice(0, 120), e1.ok && /xiaohongshu/.test(e1.out) && /douyin/.test(e1.out) && /web\(q\)/.test(e1.out) && /scholar\(q\)/.test(e1.out), '');
 
-  // E2 指定平台目录：capabilities 紧凑渲染（动作/必填/可选/价格 + 参数允许值）
+  // E2 指定平台目录：capabilities 紧凑渲染（动作/必填/可选/价格 + 参数允许值 + 参数语义）
   const e2 = await runTool(good, { kind: 'catalog', platform: 'xiaohongshu' });
-  record('E2', 'catalog 指定平台（动作/必填/允许值/价格渲染）', '含 search、{keyword}、content_type: all|image|video、¥0.037', e2.out.slice(0, 200), e2.ok && /search/.test(e2.out) && /\{keyword\}/.test(e2.out) && /content_type: all\|image\|video/.test(e2.out) && /sort: relevance\|/.test(e2.out) && /¥0\.037/.test(e2.out) && /note/.test(e2.out), '');
+  record('E2', 'catalog 指定平台（动作/必填/允许值/价格渲染）', '含 search、{keyword=语义}、content_type: all|image|video、¥0.037', e2.out.slice(0, 200), e2.ok && /search/.test(e2.out) && /\{keyword=search 为帖子关键词/.test(e2.out) && /content_type: all\|image\|video/.test(e2.out) && /sort: relevance\|/.test(e2.out) && /¥0\.037/.test(e2.out) && /note/.test(e2.out), '');
+
+  // E14 catalog 参数语义与用途提示：keyword 语义 + allowed_values 参数的用途 hint（选对动作的关键信息）
+  record('E14', 'catalog 参数语义渲染（无 allowed_values 附语义，有 allowed_values 附用途 hint）', '含 keyword=search 为帖子关键词 / date_range（内容时间窗）: no_filter|past_week', e2.out.slice(0, 300), e2.ok && /keyword=search 为帖子关键词，profile_search 为当前职位头衔/.test(e2.out) && /date_range（内容时间窗）: no_filter\|past_week/.test(e2.out), '');
 
   // E3 不存在的平台 → 友好 404
   const e3 = await runTool(good, { kind: 'catalog', platform: 'nonexist' });
@@ -177,8 +180,11 @@ const runTool = (srv, args) => srv.executeTool('everyinfra_data', args).then(
   // E5 social 同步：落盘 + 翻页提示
   const e5 = await runTool(good, { kind: 'social', platform: 'xiaohongshu', action: 'search', params: { query: '咖啡' } });
   const saved1 = /workspace\/everyinfra\/(\S+\.json)/.exec(e5.out)?.[1];
-  record('E5', 'social 同步请求（落盘+预览+翻页提示）', '含「请求成功」「已保存」next_page_token 提示', e5.out.slice(0, 150), e5.ok && /请求成功/.test(e5.out) && /已保存/.test(e5.out) && /next_page_token/.test(e5.out), saved1 || '');
+  record('E5', 'social 同步请求（落盘+摘要+翻页提示）', '含「请求成功」「已保存」「还有下一页」翻页提示', e5.out.slice(0, 150), e5.ok && /请求成功/.test(e5.out) && /已保存/.test(e5.out) && /还有下一页/.test(e5.out) && /page_token/.test(e5.out), saved1 || '');
   record('E5b', 'mock 收到的请求体（platform/action/params 透传）', '{platform:"xiaohongshu",action:"search",params.query:"咖啡"}', JSON.stringify(state.socialBodies.at(-1)), state.socialBodies.at(-1)?.platform === 'xiaohongshu' && state.socialBodies.at(-1)?.action === 'search' && state.socialBodies.at(-1)?.params?.query === '咖啡', '');
+
+  // E15 结果摘要：落盘预览为逐条一行摘要（作者|正文|互动数据），模型无需再花步数跑 python 解析
+  record('E15', 'social 落盘预览结构化摘要（逐条 作者|正文|赞评数据）', '含「结果摘要：共 1 条」/ 小红书用户A / 测试笔记 / 赞42 评7', e5.out.slice(0, 300), e5.ok && /结果摘要：共 1 条/.test(e5.out) && /小红书用户A/.test(e5.out) && /测试笔记/.test(e5.out) && /赞42/.test(e5.out) && /评7/.test(e5.out), '');
 
   // E6 page_token 翻页
   const e6 = await runTool(good, { kind: 'social', platform: 'xiaohongshu', action: 'search', params: { query: '咖啡', page_token: 'pg2' } });
@@ -200,6 +206,18 @@ const runTool = (srv, args) => srv.executeTool('everyinfra_data', args).then(
   // E11 TOOLS 注册表
   const def = good.TOOLS.find((t) => t.function.name === 'everyinfra_data');
   record('E11', 'TOOLS 注册表含 everyinfra_data（4 种 kind）', '定义存在且 enum 含 catalog/social/search/job', def ? def.function.parameters.properties.kind.enum.join(',') : '缺失', Boolean(def) && def.function.parameters.properties.kind.enum.length === 4, '');
+
+  // E11b 工具描述含选动作指引（防止拿人名/公司名去 search 帖文搜索）
+  record('E11b', 'everyinfra_data 描述含选动作指引', '含 profile_search/company_profile 指引与「search 搜的是内容不是人」提醒', def ? def.function.description.slice(0, 200) : '缺失', Boolean(def) && /profile_search/.test(def.function.description) && /company_profile/.test(def.function.description) && /内容.*不是.*人|不是"人"/.test(def.function.description), '');
+
+  // E16 truncate 保头保尾：超长工具输出保留首尾（统计结论常在末尾，只留头会让模型误判"失败"而连环重试烧步数）
+  const trunc = freshServer({ EVERYINFRA_BASE_URL: MOCK, EVERYINFRA_API_KEY: 'test-key', MAX_TOOL_OUTPUT: '100' });
+  const testFile = 'truncate_headtail_test.txt';
+  const long = 'A'.repeat(50) + 'MIDDLE' + 'Z'.repeat(50); // 106 字符
+  await trunc.executeTool('write_file', { path: testFile, content: long });
+  const e16 = await trunc.executeTool('read_file', { path: testFile }).then((out) => ({ ok: true, out }), (e) => ({ ok: false, out: e.message }));
+  try { fs.unlinkSync(path.join(ROOT, 'workspace', testFile)); } catch { /* 已清理 */ }
+  record('E16', 'truncate 保头保尾（头部+尾部+中段省略标记）', '开头 A 串与结尾 Z 串均保留，含「中段已省略」与原长度', String(e16.out).slice(0, 150), e16.ok && /^AAA/.test(e16.out) && /ZZZ/.test(e16.out) && /中段已省略/.test(e16.out) && /原输出共 106 字符/.test(e16.out), '');
 
   /* -- 组合 B：未配 key → 友好报错（不发请求） -- */
   const nokey = freshServer({ EVERYINFRA_API_KEY: '', EVERYINFRA_BASE_URL: MOCK });
